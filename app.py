@@ -101,7 +101,7 @@ def create_styled_frame(bg_image, text_lines, frame_num, total_frames, section):
         # Fact number badge
         num = text_lines.get('num', '1')
         badge_color = [(255, 50, 100), (100, 100, 255), (50, 200, 100)][int(num) - 1] if num.isdigit() else (255, 50, 100)
-        draw.circle((70, 120 - slide_offset), radius=40, fill=badge_color)
+        draw.ellipse([(30, 80 - slide_offset), (110, 160 - slide_offset)], fill=badge_color)
         draw.text((57, 100 - slide_offset), num, font=font_title, fill=(255, 255, 255))
 
         # Fact text
