@@ -1,21 +1,26 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import subprocess
 import os
 import tempfile
 import base64
+import threading
+import uuid
+import time
+import math
+import random
 import urllib.request
-import json
-from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import textwrap
 
 app = Flask(__name__)
 
+# In-memory job storage
+jobs = {}
+
 MANGA_BACKGROUNDS = [
     "https://images.unsplash.com/photo-1578632767115-351597cf2477?w=720&h=1280&fit=crop",
     "https://images.unsplash.com/photo-1541701494587-cb58502866ab?w=720&h=1280&fit=crop",
-    "https://images.unsplash.com/photo-1502318217862-aa4e294ba657?w=720&h=1280&fit=crop",
     "https://images.unsplash.com/photo-1557682250-33bd709cbe85?w=720&h=1280&fit=crop",
-    "https://images.unsplash.com/photo-1518791841217-8f162f1912da?w=720&h=1280&fit=crop",
 ]
 
 def download_image(url, path):
@@ -28,217 +33,295 @@ def download_image(url, path):
     except:
         return False
 
-def create_manga_frame(script, frame_num, total_frames, bg_path=None):
+def ease_in_out(t):
+    return t * t * (3 - 2 * t)
+
+def draw_text_with_shadow(draw, pos, text, font, color, shadow_color=(0,0,0), offset=3):
+    x, y = pos
+    draw.text((x+offset, y+offset), text, font=font, fill=shadow_color)
+    draw.text((x, y), text, font=font, fill=color)
+
+def create_animated_frame(script, frame_num, total_frames, bg_img=None):
     width, height = 720, 1280
-    
-    # Load or create background
-    if bg_path and os.path.exists(bg_path):
-        try:
-            bg = Image.open(bg_path).convert('RGB').resize((width, height))
-            # Apply manga/comic filter
-            enhancer = ImageEnhance.Contrast(bg)
-            bg = enhancer.enhance(1.5)
-            enhancer = ImageEnhance.Sharpness(bg)
-            bg = enhancer.enhance(2.0)
-            # Convert to high contrast black and white manga style
-            bg_gray = bg.convert('L')
-            bg = bg_gray.convert('RGB')
-            enhancer = ImageEnhance.Contrast(bg)
-            bg = enhancer.enhance(2.0)
-        except:
-            bg = Image.new('RGB', (width, height), (20, 20, 30))
+    fps = 24
+    t = frame_num / total_frames  # 0.0 to 1.0
+
+    # Base background
+    if bg_img:
+        img = bg_img.copy().resize((width, height))
+        enhancer = ImageEnhance.Brightness(img)
+        img = enhancer.enhance(0.3)
     else:
-        bg = Image.new('RGB', (width, height), (20, 20, 30))
-    
-    img = bg.copy()
+        img = Image.new('RGB', (width, height), (10, 10, 20))
+
     draw = ImageDraw.Draw(img)
-    
-    # Add dark overlay for readability
-    overlay = Image.new('RGBA', (width, height), (0, 0, 0, 140))
-    img = img.convert('RGBA')
-    img = Image.alpha_composite(img, overlay)
-    img = img.convert('RGB')
-    draw = ImageDraw.Draw(img)
-    
+
+    # Load fonts
     try:
-        font_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 52)
-        font_body = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 34)
-        font_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
-        font_big = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 80)
+        f_huge = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 90)
+        f_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 54)
+        f_body = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 36)
+        f_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 28)
     except:
-        font_title = ImageFont.load_default()
-        font_body = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-        font_big = ImageFont.load_default()
+        f_huge = f_title = f_body = f_small = ImageFont.load_default()
 
-    progress = frame_num / max(total_frames - 1, 1)
-    
-    # Draw manga-style speed lines in corners
-    import math
-    center_x, center_y = width // 2, height // 2
-    for angle in range(0, 360, 15):
-        rad = math.radians(angle)
-        x_end = center_x + int(math.cos(rad) * 800)
-        y_end = center_y + int(math.sin(rad) * 1400)
-        draw.line([(center_x, center_y), (x_end, y_end)], fill=(50, 50, 80, 30), width=1)
+    # Animated speed lines (always visible, rotating)
+    cx, cy = width // 2, height // 2
+    angle_offset = frame_num * 2
+    for angle in range(0, 360, 12):
+        rad = math.radians(angle + angle_offset)
+        length = 800 + 100 * math.sin(math.radians(frame_num * 5 + angle))
+        x_end = cx + int(math.cos(rad) * length)
+        y_end = cy + int(math.sin(rad) * length)
+        alpha = int(15 + 10 * math.sin(math.radians(frame_num * 3)))
+        draw.line([(cx, cy), (x_end, y_end)], fill=(80, 80, 120), width=1)
 
-    # Animated border (manga panel style)
-    border_color = (255, 220, 0)  # Yellow manga border
-    border_width = 8
-    draw.rectangle([(border_width, border_width), (width - border_width, height - border_width)], 
-                   outline=border_color, width=border_width)
-    
-    # Inner border
-    draw.rectangle([(20, 20), (width - 20, height - 20)], 
-                   outline=(255, 255, 255), width=2)
+    # Animated border pulse
+    pulse = int(4 + 4 * math.sin(math.radians(frame_num * 8)))
+    draw.rectangle([(pulse, pulse), (width-pulse, height-pulse)], outline=(255, 220, 0), width=pulse)
+    draw.rectangle([(pulse+12, pulse+12), (width-pulse-12, height-pulse-12)], outline=(255, 255, 255), width=2)
 
-    # Phase 1: Show title with animation (0-25%)
-    if progress <= 0.25:
-        phase_progress = progress / 0.25
-        
-        # Exclamation marks manga style
-        draw.text((width//2 - 60, 80), "!", font=font_big, fill=(255, 50, 50))
-        draw.text((width//2 + 10, 80), "!", font=font_big, fill=(255, 220, 0))
-        
+    # PHASE 1: Title intro (0-20%)
+    if t < 0.20:
+        phase_t = t / 0.20
+        eased = ease_in_out(phase_t)
+
+        # Flash effect at start
+        if phase_t < 0.15:
+            flash_alpha = int(255 * (1 - phase_t / 0.15))
+            flash = Image.new('RGBA', (width, height), (255, 255, 255, flash_alpha))
+            img = img.convert('RGBA')
+            img = Image.alpha_composite(img, flash)
+            img = img.convert('RGB')
+            draw = ImageDraw.Draw(img)
+
+        # Impact lines
+        for i in range(20):
+            angle = random.randint(0, 360)
+            rad = math.radians(angle)
+            x1 = cx + int(math.cos(rad) * 50)
+            y1 = cy + int(math.sin(rad) * 50)
+            x2 = cx + int(math.cos(rad) * (200 + random.randint(0, 300)))
+            y2 = cy + int(math.sin(rad) * (200 + random.randint(0, 300)))
+            draw.line([(x1, y1), (x2, y2)], fill=(255, 220, 0), width=2)
+
+        # Title slides in from top
+        title = script.get('titre', 'LE SAVIEZ-VOUS ?')
+        wrapped = textwrap.fill(title, width=18)
+        slide_y = int(-200 + eased * 320)
+
         # Title box
-        draw.rectangle([(30, 220), (width - 30, 420)], fill=(0, 0, 0, 200))
-        draw.rectangle([(30, 220), (width - 30, 420)], outline=(255, 220, 0), width=4)
-        
-        title = script.get('titre', 'FAIT DU JOUR')
-        wrapped = textwrap.fill(title, width=20)
-        
-        # Shadow effect
-        draw.text((54, 244), wrapped, font=font_title, fill=(255, 100, 0))
-        draw.text((50, 240), wrapped, font=font_title, fill=(255, 255, 255))
-        
-        # "Le saviez-vous?" badge
-        draw.rectangle([(30, 440), (340, 490)], fill=(255, 50, 50))
-        draw.text((40, 448), "LE SAVIEZ-VOUS ?", font=font_small, fill=(255, 255, 255))
+        box_y1 = slide_y
+        box_y2 = slide_y + 280
+        draw.rectangle([(30, box_y1), (width-30, box_y2)], fill=(0, 0, 0))
+        draw.rectangle([(30, box_y1), (width-30, box_y2)], outline=(255, 220, 0), width=6)
+        draw_text_with_shadow(draw, (50, box_y1 + 20), wrapped, f_title, (255, 255, 255))
 
-    # Phase 2: Show fact 1 (25-50%)
-    elif progress <= 0.50:
-        phase_progress = (progress - 0.25) / 0.25
-        
-        # Panel header
-        draw.rectangle([(30, 60), (width - 30, 120)], fill=(255, 50, 50))
-        draw.text((40, 70), "FAIT #1", font=font_body, fill=(255, 255, 255))
-        
-        # Fact box
-        draw.rectangle([(30, 140), (width - 30, 700)], fill=(0, 0, 0))
-        draw.rectangle([(30, 140), (width - 30, 700)], outline=(255, 255, 255), width=3)
-        
+        # Exclamation animated
+        exc_scale = int(50 + 40 * math.sin(math.radians(frame_num * 15)))
+        draw_text_with_shadow(draw, (30, height - 200), "!", f_huge, (255, 50, 50))
+        draw_text_with_shadow(draw, (width - 100, height - 200), "!", f_huge, (255, 220, 0))
+
+    # PHASE 2: Fact 1 slides in (20-45%)
+    elif t < 0.45:
+        phase_t = (t - 0.20) / 0.25
+        eased = ease_in_out(phase_t)
+
+        # Header
+        header_w = int(eased * (width - 60))
+        draw.rectangle([(30, 60), (30 + header_w, 120)], fill=(255, 50, 50))
+        if eased > 0.5:
+            draw_text_with_shadow(draw, (50, 70), "FAIT #1", f_body, (255, 255, 255))
+
+        # Fact box slides from right
+        box_x = int(width + 50 - eased * (width + 50 - 30))
         fact1 = script.get('fait1', '')
-        wrapped = textwrap.fill(fact1, width=28)
-        draw.text((50, 160), wrapped, font=font_body, fill=(255, 255, 255))
-        
-        # Animated arrow
-        arrow_y = int(720 + phase_progress * 50)
-        draw.text((width//2 - 20, arrow_y), "▼", font=font_title, fill=(255, 220, 0))
+        wrapped = textwrap.fill(fact1, width=26)
+        lines = wrapped.split('\n')
+        box_h = len(lines) * 52 + 60
 
-    # Phase 3: Show fact 2 (50-75%)
-    elif progress <= 0.75:
-        phase_progress = (progress - 0.50) / 0.25
-        
-        draw.rectangle([(30, 60), (width - 30, 120)], fill=(50, 100, 255))
-        draw.text((40, 70), "FAIT #2", font=font_body, fill=(255, 255, 255))
-        
-        draw.rectangle([(30, 140), (width - 30, 700)], fill=(0, 0, 0))
-        draw.rectangle([(30, 140), (width - 30, 700)], outline=(255, 255, 255), width=3)
-        
+        draw.rectangle([(box_x, 140), (box_x + width - 60, 140 + box_h)], fill=(0, 0, 0))
+        draw.rectangle([(box_x, 140), (box_x + width - 60, 140 + box_h)], outline=(255, 255, 255), width=3)
+
+        if eased > 0.3:
+            char_reveal = int((eased - 0.3) / 0.7 * len(fact1))
+            revealed_text = textwrap.fill(fact1[:char_reveal], width=26)
+            draw_text_with_shadow(draw, (box_x + 20, 160), revealed_text, f_body, (255, 255, 255))
+
+        # Bouncing arrow
+        arrow_y = int(140 + box_h + 40 + 20 * math.sin(math.radians(frame_num * 10)))
+        draw_text_with_shadow(draw, (cx - 20, arrow_y), "▼", f_title, (255, 220, 0))
+
+    # PHASE 3: Fact 2 slides in (45-70%)
+    elif t < 0.70:
+        phase_t = (t - 0.45) / 0.25
+        eased = ease_in_out(phase_t)
+
+        header_w = int(eased * (width - 60))
+        draw.rectangle([(30, 60), (30 + header_w, 120)], fill=(50, 100, 255))
+        if eased > 0.5:
+            draw_text_with_shadow(draw, (50, 70), "FAIT #2", f_body, (255, 255, 255))
+
+        # Slides from left this time
+        box_x = int(-width + eased * (width - 30))
         fact2 = script.get('fait2', '')
-        wrapped = textwrap.fill(fact2, width=28)
-        draw.text((50, 160), wrapped, font=font_body, fill=(255, 255, 255))
-        
-        arrow_y = int(720 + phase_progress * 50)
-        draw.text((width//2 - 20, arrow_y), "▼", font=font_title, fill=(255, 220, 0))
+        wrapped = textwrap.fill(fact2, width=26)
+        lines = wrapped.split('\n')
+        box_h = len(lines) * 52 + 60
 
-    # Phase 4: Show conclusion (75-100%)
-    else:
-        draw.rectangle([(30, 60), (width - 30, 120)], fill=(255, 220, 0))
-        draw.text((40, 70), "CONCLUSION", font=font_body, fill=(0, 0, 0))
-        
-        draw.rectangle([(30, 140), (width - 30, 800)], fill=(0, 0, 0))
-        draw.rectangle([(30, 140), (width - 30, 800)], outline=(255, 220, 0), width=4)
-        
+        draw.rectangle([(box_x, 140), (box_x + width - 60, 140 + box_h)], fill=(0, 0, 30))
+        draw.rectangle([(box_x, 140), (box_x + width - 60, 140 + box_h)], outline=(50, 100, 255), width=3)
+
+        if eased > 0.3:
+            char_reveal = int((eased - 0.3) / 0.7 * len(fact2))
+            revealed_text = textwrap.fill(fact2[:char_reveal], width=26)
+            draw_text_with_shadow(draw, (box_x + 20, 160), revealed_text, f_body, (200, 220, 255))
+
+        arrow_y = int(140 + box_h + 40 + 20 * math.sin(math.radians(frame_num * 10)))
+        draw_text_with_shadow(draw, (cx - 20, arrow_y), "▼", f_title, (255, 220, 0))
+
+    # PHASE 4: Conclusion zoom in (70-90%)
+    elif t < 0.90:
+        phase_t = (t - 0.70) / 0.20
+        eased = ease_in_out(phase_t)
+
+        # Zoom effect on conclusion box
+        box_margin = int(30 + (1 - eased) * 200)
+        draw.rectangle([(box_margin, 80), (width - box_margin, 900)], fill=(0, 0, 0))
+        draw.rectangle([(box_margin, 80), (width - box_margin, 900)], outline=(255, 220, 0), width=6)
+
         conclusion = script.get('conclusion', '')
-        wrapped = textwrap.fill(conclusion, width=26)
-        draw.text((50, 160), wrapped, font=font_body, fill=(255, 220, 0))
-        
-        # Follow badge
-        draw.rectangle([(30, 1100), (width - 30, 1180)], fill=(255, 50, 50))
-        draw.text((50, 1115), "SUIVEZ POUR PLUS ! 🔥", font=font_body, fill=(255, 255, 255))
+        if eased > 0.2:
+            alpha_text = min(1.0, (eased - 0.2) / 0.8)
+            wrapped = textwrap.fill(conclusion, width=22)
+            draw_text_with_shadow(draw, (box_margin + 20, 120), wrapped, f_body, (255, 220, 0))
 
-    # Frame counter (manga style)
-    draw.text((width - 80, height - 60), f"{frame_num+1}", font=font_small, fill=(150, 150, 150))
-    
-    return img
+        # Pulsing stars
+        for i in range(5):
+            star_x = 60 + i * 120
+            star_y = int(920 + 15 * math.sin(math.radians(frame_num * 8 + i * 72)))
+            draw_text_with_shadow(draw, (star_x, star_y), "★", f_body, (255, 220, 0))
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'ok'})
+    # PHASE 5: Call to action (90-100%)
+    else:
+        phase_t = (t - 0.90) / 0.10
+        eased = ease_in_out(phase_t)
 
-@app.route('/generate-video', methods=['POST'])
-def generate_video():
+        conclusion = script.get('conclusion', '')
+        wrapped = textwrap.fill(conclusion, width=22)
+        draw.rectangle([(30, 80), (width-30, 500)], fill=(0, 0, 0))
+        draw.rectangle([(30, 80), (width-30, 500)], outline=(255, 220, 0), width=4)
+        draw_text_with_shadow(draw, (50, 100), wrapped, f_body, (255, 220, 0))
+
+        # CTA pulsing
+        cta_scale = 1 + 0.05 * math.sin(math.radians(frame_num * 12))
+        cta_y = int(height - 300 + 10 * math.sin(math.radians(frame_num * 8)))
+        draw.rectangle([(30, cta_y), (width-30, cta_y + 100)], fill=(255, 50, 50))
+        draw.rectangle([(30, cta_y), (width-30, cta_y + 100)], outline=(255, 255, 255), width=3)
+        draw_text_with_shadow(draw, (50, cta_y + 20), "SUIVEZ POUR PLUS ! 🔥", f_body, (255, 255, 255))
+
+        hashtags = script.get('hashtags', '')
+        draw_text_with_shadow(draw, (40, height - 140), hashtags[:40], f_small, (150, 200, 255))
+
+    return img.convert('RGB')
+
+
+def generate_video_async(job_id, script):
+    jobs[job_id]['status'] = 'processing'
+
     try:
-        data = request.json
-        script = data.get('script', {})
-        
-        fps = 12
+        fps = 24
         duration = 30
         total_frames = fps * duration
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            # Try to download a background image
+            # Try background image
             bg_path = os.path.join(tmpdir, 'bg.jpg')
-            bg_downloaded = False
-            import random
-            bg_url = random.choice(MANGA_BACKGROUNDS)
-            bg_downloaded = download_image(bg_url, bg_path)
-            
-            # Generate frames
+            bg_img = None
+            if download_image(random.choice(MANGA_BACKGROUNDS), bg_path):
+                try:
+                    bg_img = Image.open(bg_path).convert('RGB')
+                except:
+                    bg_img = None
+
             frames_dir = os.path.join(tmpdir, 'frames')
             os.makedirs(frames_dir)
-            
+
             for i in range(total_frames):
-                frame = create_manga_frame(
-                    script, i, total_frames,
-                    bg_path if bg_downloaded else None
-                )
-                frame_path = os.path.join(frames_dir, f'frame_{i:04d}.png')
-                frame.save(frame_path, 'PNG')
-            
+                frame = create_animated_frame(script, i, total_frames, bg_img)
+                frame.save(os.path.join(frames_dir, f'frame_{i:04d}.png'))
+
             output_path = os.path.join(tmpdir, 'video.mp4')
-            
+
             cmd = [
                 'ffmpeg', '-y',
                 '-framerate', str(fps),
                 '-i', os.path.join(frames_dir, 'frame_%04d.png'),
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
-                '-crf', '28',
+                '-crf', '26',
                 '-pix_fmt', 'yuv420p',
-                '-vf', f'scale=720:1280',
                 output_path
             ]
-            
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
-            
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
             if result.returncode != 0:
-                return jsonify({'error': result.stderr[-500:]}), 500
-            
+                jobs[job_id]['status'] = 'error'
+                jobs[job_id]['error'] = result.stderr[-300:]
+                return
+
             with open(output_path, 'rb') as f:
                 video_base64 = base64.b64encode(f.read()).decode('utf-8')
-            
-            date = script.get('date', 'today')
-            return jsonify({
-                'success': True,
-                'video_base64': video_base64,
-                'filename': f'video_{date}.mp4'
-            })
+
+            jobs[job_id]['status'] = 'done'
+            jobs[job_id]['video_base64'] = video_base64
+            jobs[job_id]['filename'] = f"video_{script.get('date', 'today')}.mp4"
 
     except Exception as e:
-        import traceback
-        return jsonify({'error': str(e), 'trace': traceback.format_exc()}), 500
+        jobs[job_id]['status'] = 'error'
+        jobs[job_id]['error'] = str(e)
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    return jsonify({'status': 'ok'})
+
+
+@app.route('/generate-video', methods=['POST'])
+def generate_video():
+    data = request.json
+    script = data.get('script', {})
+
+    job_id = str(uuid.uuid4())
+    jobs[job_id] = {'status': 'queued', 'created_at': time.time()}
+
+    thread = threading.Thread(target=generate_video_async, args=(job_id, script))
+    thread.daemon = True
+    thread.start()
+
+    return jsonify({'job_id': job_id, 'status': 'queued'})
+
+
+@app.route('/job/<job_id>', methods=['GET'])
+def get_job(job_id):
+    if job_id not in jobs:
+        return jsonify({'error': 'Job not found'}), 404
+
+    job = jobs[job_id]
+
+    if job['status'] == 'done':
+        return jsonify({
+            'status': 'done',
+            'success': True,
+            'video_base64': job['video_base64'],
+            'filename': job['filename']
+        })
+    elif job['status'] == 'error':
+        return jsonify({'status': 'error', 'error': job.get('error', 'Unknown error')}), 500
+    else:
+        return jsonify({'status': job['status']})
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8080))
