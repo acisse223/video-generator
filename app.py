@@ -108,7 +108,7 @@ def generate_video():
                     '-loop', '1',
                     '-i', img_path,
                     '-c:v', 'libx264',
-                    '-t', '30',
+                    '-t', '10',
                     '-pix_fmt', 'yuv420p',
                     '-vf', 'scale=1080:1920',
                     output_path
