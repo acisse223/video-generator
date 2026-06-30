@@ -83,17 +83,17 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
     top = max(0, min(top, new_h - H))
     img = img.crop((left, top, left + W, top + H))
 
-    img = ImageEnhance.Color(img).enhance(1.3)
-    img = ImageEnhance.Contrast(img).enhance(1.2)
-    img = ImageEnhance.Brightness(img).enhance(0.55)
+    img = ImageEnhance.Color(img).enhance(1.4)
+    img = ImageEnhance.Contrast(img).enhance(1.25)
+    img = ImageEnhance.Brightness(img).enhance(0.85)
     return img
 
 
 def add_vignette(img):
     vignette = Image.new('L', (W, H), 0)
     vd = ImageDraw.Draw(vignette)
-    vd.ellipse([-W*0.3, -H*0.3, W*1.3, H*1.3], fill=255)
-    vignette = vignette.filter(ImageFilter.GaussianBlur(150))
+    vd.ellipse([-W*0.5, -H*0.5, W*1.5, H*1.5], fill=255)
+    vignette = vignette.filter(ImageFilter.GaussianBlur(180))
     black = Image.new('RGB', (W, H), (0, 0, 0))
     return Image.composite(img, black, vignette)
 
@@ -108,17 +108,27 @@ def draw_particles(draw, frame_num, color, count=14):
         draw.ellipse([(px, py), (px + size, py + size)], fill=(*color, int(160 * alpha_mult)))
 
 
-def draw_word_with_outline(draw, pos, text, font, fill, outline_color=(0, 0, 0), outline_w=4):
+def draw_glow_word(draw, pos, text, font, fill, glow_radius=8):
+    """Bright glowing outline effect for maximum pop/shine."""
     x, y = pos
-    for dx in range(-outline_w, outline_w + 1):
-        for dy in range(-outline_w, outline_w + 1):
-            if dx*dx + dy*dy <= outline_w*outline_w:
-                draw.text((x + dx, y + dy), text, font=font, fill=outline_color)
+    # Outer glow (soft, colored, wide)
+    for r in range(glow_radius, 0, -2):
+        alpha = int(60 * (1 - r / glow_radius))
+        for dx, dy in [(-r, 0), (r, 0), (0, -r), (0, r), (-r, -r), (r, r), (-r, r), (r, -r)]:
+            draw.text((x + dx, y + dy), text, font=font, fill=(*fill, alpha))
+    # Black outline for contrast/readability
+    for dx in range(-4, 5):
+        for dy in range(-4, 5):
+            if dx*dx + dy*dy <= 16:
+                draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
+    # Bright core text
     draw.text((x, y), text, font=font, fill=fill)
+    # White highlight on top for extra shine
+    draw.text((x, y - 2), text, font=font, fill=(255, 255, 255, 90))
 
 
 def draw_tiktok_caption(draw, fonts, caption_text, frame_in_caption, total_frames_caption, base_y, color_index):
-    pop_t = min(1.0, frame_in_caption / 6)
+    pop_t = min(1.0, frame_in_caption / 5)
     scale = ease_out_back(pop_t)
 
     color = WORD_COLORS[color_index % len(WORD_COLORS)]
@@ -130,13 +140,16 @@ def draw_tiktok_caption(draw, fonts, caption_text, frame_in_caption, total_frame
     line_height = 64
     total_h = len(lines) * line_height
 
+    # Continuous subtle pulse after pop-in for constant "alive" energy
+    pulse = 1.0 + 0.04 * math.sin(frame_in_caption * 0.5) if pop_t >= 1 else 1.0
+
     y = base_y - total_h // 2
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
         line_w = bbox[2] - bbox[0]
-        x = (W - line_w) // 2
-        bounce_offset = int((1 - scale) * 30) if pop_t < 1 else 0
-        draw_word_with_outline(draw, (x, y - bounce_offset), line, font, color, outline_color=(0, 0, 0), outline_w=5)
+        x = (W - int(line_w * pulse)) // 2
+        bounce_offset = int((1 - scale) * 40) if pop_t < 1 else int(3 * math.sin(frame_in_caption * 0.5))
+        draw_glow_word(draw, (x, y - bounce_offset), line, font, color, glow_radius=10)
         y += line_height
 
 
@@ -149,7 +162,7 @@ def create_frame(bg_image, text_data, frame_num, total_frames, section, palette,
     bg = prep_background(bg_image, frame_num, total_frames, motion_seed)
     img = bg.convert('RGBA')
 
-    overlay = Image.new('RGBA', (W, H), (*accent, 15))
+    overlay = Image.new('RGBA', (W, H), (*accent, 8))
     img = Image.alpha_composite(img, overlay).convert('RGB')
     img = add_vignette(img)
     draw = ImageDraw.Draw(img, 'RGBA')
@@ -217,7 +230,7 @@ def generate_voiceover(text, output_path):
         word_boundaries = []
 
         async def _generate():
-            communicate = edge_tts.Communicate(text, voice, rate="+8%", pitch="+2Hz")
+            communicate = edge_tts.Communicate(text, voice, rate="+25%", pitch="+8Hz")
             with open(output_path, 'wb') as f:
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
@@ -343,7 +356,9 @@ def generate_video_async(job_id, script, images_b64):
                 total_duration = 25
 
             img_keys = ['image1', 'image2', 'image3']
-            section_duration = total_duration / 3
+            # Cycle through images more often for more visual variety (6 micro-sections instead of 3)
+            n_micro_sections = 6
+            section_duration = total_duration / n_micro_sections
 
             frames_dir = os.path.join(tmpdir, 'frames')
             os.makedirs(frames_dir)
@@ -365,19 +380,23 @@ def generate_video_async(job_id, script, images_b64):
                         print(f"Image load error for {key}: {e}")
                 bgs.append(bg)
 
-            section_names = ['titre', 'fait', 'conclusion']
+            # Map 6 micro-sections to the 3 background images: 1,2,3,1,2,3 (zoom direction alternates for variety)
+            micro_to_img = [0, 1, 2, 0, 1, 2]
+            section_names = ['titre', 'fait', 'fait', 'fait', 'fait', 'conclusion']
 
             for frame_num in range(total_frames):
                 t_sec = frame_num / fps
-                section_idx = min(int(t_sec / section_duration), 2)
+                section_idx = min(int(t_sec / section_duration), n_micro_sections - 1)
                 section_name = section_names[section_idx]
-                bg = bgs[section_idx]
+                bg = bgs[micro_to_img[section_idx]]
                 local_frame_num = frame_num - int(section_idx * section_duration * fps)
+                # Alternate motion seed per micro-section so the Ken Burns direction changes each time
+                local_motion_seed = motion_seed + section_idx * 1.7
 
                 frame = create_frame(
                     bg, {'hashtags': script.get('hashtags', '')},
                     local_frame_num, int(section_duration * fps), section_name,
-                    palette, motion_seed,
+                    palette, local_motion_seed,
                     caption_groups=caption_groups, caption_timings=caption_timings,
                     global_frame_num=frame_num, fps=fps
                 )
