@@ -83,19 +83,15 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
     top = max(0, min(top, new_h - H))
     img = img.crop((left, top, left + W, top + H))
 
-    img = ImageEnhance.Color(img).enhance(1.4)
-    img = ImageEnhance.Contrast(img).enhance(1.25)
-    img = ImageEnhance.Brightness(img).enhance(0.85)
+    img = ImageEnhance.Color(img).enhance(1.25)
+    img = ImageEnhance.Contrast(img).enhance(1.1)
+    img = ImageEnhance.Brightness(img).enhance(1.0)
     return img
 
 
-def add_vignette(img):
-    vignette = Image.new('L', (W, H), 0)
-    vd = ImageDraw.Draw(vignette)
-    vd.ellipse([-W*0.5, -H*0.5, W*1.5, H*1.5], fill=255)
-    vignette = vignette.filter(ImageFilter.GaussianBlur(180))
-    black = Image.new('RGB', (W, H), (0, 0, 0))
-    return Image.composite(img, black, vignette)
+def add_subtle_grade(img):
+    """Light, modern color grade instead of old-school dark vignette."""
+    return img
 
 
 def draw_particles(draw, frame_num, color, count=14):
@@ -109,22 +105,18 @@ def draw_particles(draw, frame_num, color, count=14):
 
 
 def draw_glow_word(draw, pos, text, font, fill, glow_radius=8):
-    """Bright glowing outline effect for maximum pop/shine."""
+    """Clean modern caption style: bold outline + drop shadow, crisp and punchy (no old-school halo glow)."""
     x, y = pos
-    # Outer glow (soft, colored, wide)
-    for r in range(glow_radius, 0, -2):
-        alpha = int(60 * (1 - r / glow_radius))
-        for dx, dy in [(-r, 0), (r, 0), (0, -r), (0, r), (-r, -r), (r, r), (-r, r), (r, -r)]:
-            draw.text((x + dx, y + dy), text, font=font, fill=(*fill, alpha))
-    # Black outline for contrast/readability
-    for dx in range(-4, 5):
-        for dy in range(-4, 5):
-            if dx*dx + dy*dy <= 16:
+    # Soft drop shadow for depth
+    draw.text((x + 4, y + 6), text, font=font, fill=(0, 0, 0, 110))
+    # Crisp black outline for contrast on any background
+    outline_w = 5
+    for dx in range(-outline_w, outline_w + 1):
+        for dy in range(-outline_w, outline_w + 1):
+            if dx*dx + dy*dy <= outline_w*outline_w and (dx != 0 or dy != 0):
                 draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
-    # Bright core text
+    # Bright flat color core
     draw.text((x, y), text, font=font, fill=fill)
-    # White highlight on top for extra shine
-    draw.text((x, y - 2), text, font=font, fill=(255, 255, 255, 90))
 
 
 def draw_tiktok_caption(draw, fonts, caption_text, frame_in_caption, total_frames_caption, base_y, color_index):
@@ -140,55 +132,34 @@ def draw_tiktok_caption(draw, fonts, caption_text, frame_in_caption, total_frame
     line_height = 64
     total_h = len(lines) * line_height
 
-    # Continuous subtle pulse after pop-in for constant "alive" energy
-    pulse = 1.0 + 0.04 * math.sin(frame_in_caption * 0.5) if pop_t >= 1 else 1.0
-
     y = base_y - total_h // 2
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
         line_w = bbox[2] - bbox[0]
-        x = (W - int(line_w * pulse)) // 2
-        bounce_offset = int((1 - scale) * 40) if pop_t < 1 else int(3 * math.sin(frame_in_caption * 0.5))
-        draw_glow_word(draw, (x, y - bounce_offset), line, font, color, glow_radius=10)
+        x = (W - line_w) // 2
+        bounce_offset = int((1 - scale) * 40) if pop_t < 1 else 0
+        draw_glow_word(draw, (x, y - bounce_offset), line, font, color)
         y += line_height
 
 
 def create_frame(bg_image, text_data, frame_num, total_frames, section, palette, motion_seed,
                   caption_groups=None, caption_timings=None, global_frame_num=0, fps=24):
     fonts = load_fonts()
-    accent = palette['accent']
     accent2 = palette['accent2']
 
+    # Clean bright background, no dark vignette, no old-film borders
     bg = prep_background(bg_image, frame_num, total_frames, motion_seed)
-    img = bg.convert('RGBA')
-
-    overlay = Image.new('RGBA', (W, H), (*accent, 8))
-    img = Image.alpha_composite(img, overlay).convert('RGB')
-    img = add_vignette(img)
+    img = bg.convert('RGB')
     draw = ImageDraw.Draw(img, 'RGBA')
 
-    draw_particles(draw, global_frame_num, accent2, count=14)
-
-    if frame_num < 4:
-        flash_alpha = int(150 * (1 - frame_num / 4) ** 2)
-        flash = Image.new('RGBA', (W, H), (*accent, flash_alpha))
+    # Quick clean flash only on the very first frame of the whole video (not every section)
+    if global_frame_num < 3:
+        flash_alpha = int(120 * (1 - global_frame_num / 3))
+        flash = Image.new('RGBA', (W, H), (255, 255, 255, flash_alpha))
         img = Image.alpha_composite(img.convert('RGBA'), flash).convert('RGB')
         draw = ImageDraw.Draw(img, 'RGBA')
 
-    bracket_len = 45
-    bw = 5
-    corners = [(20, 20, 1, 1), (W - 20, 20, -1, 1), (20, H - 20, 1, -1), (W - 20, H - 20, -1, -1)]
-    for cxp, cyp, sx, sy in corners:
-        draw.line([(cxp, cyp), (cxp + sx * bracket_len, cyp)], fill=(*accent, 200), width=bw)
-        draw.line([(cxp, cyp), (cxp, cyp + sy * bracket_len)], fill=(*accent, 200), width=bw)
-
-    badge_label = {"titre": "⚡ FAIT CHOC", "fait": "💡 LE SAVAIS-TU ?", "conclusion": "🔥 RETIENS ÇA"}.get(section, "")
-    if badge_label:
-        bbox = draw.textbbox((0, 0), badge_label, font=fonts['tag'])
-        badge_w = (bbox[2] - bbox[0]) + 40
-        draw.rounded_rectangle([(W//2 - badge_w//2, 60), (W//2 + badge_w//2, 106)], radius=23, fill=accent)
-        draw.text((W//2 - badge_w//2 + 20, 71), badge_label, font=fonts['tag'], fill=(255, 255, 255))
-
+    # Modern bold word-by-word captions, centered, big and clean (MrBeast/Hormozi style)
     if caption_groups and caption_timings:
         t_sec = global_frame_num / fps
         active_idx = None
@@ -203,21 +174,17 @@ def create_frame(bg_image, text_data, frame_num, total_frames, section, palette,
             draw_tiktok_caption(
                 draw, fonts, caption_groups[active_idx],
                 frame_in_caption, total_frames_caption,
-                base_y=H - 280, color_index=active_idx
+                base_y=int(H * 0.62), color_index=active_idx
             )
 
     if section == 'conclusion':
         hashtags = text_data.get('hashtags', '')
         bbox = draw.textbbox((0, 0), hashtags[:42], font=fonts['small'])
         hx = (W - (bbox[2] - bbox[0])) // 2
-        draw.text((hx, H - 90), hashtags[:42], font=fonts['small'], fill=(*accent2, 255))
-
-        pulse = 1 + 0.06 * math.sin(global_frame_num * 0.4)
-        cta_w = int(560 * pulse)
-        cta_x = (W - cta_w) // 2
-        cta_y = 130
-        draw.rounded_rectangle([(cta_x, cta_y), (cta_x + cta_w, cta_y + 70)], radius=35, fill=accent2)
-        draw.text((cta_x + 50, cta_y + 16), "SUIVEZ POUR PLUS ! 🔥", font=fonts['tag'], fill=(10, 10, 15))
+        # Simple flat pill background, no glow/pulse gimmicks
+        draw.rounded_rectangle([(hx - 16, H - 100), (hx + (bbox[2]-bbox[0]) + 16, H - 56)],
+                                radius=18, fill=(0, 0, 0, 140))
+        draw.text((hx, H - 92), hashtags[:42], font=fonts['small'], fill=(255, 255, 255))
 
     return img.convert('RGB')
 
