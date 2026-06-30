@@ -19,20 +19,11 @@ jobs = {}
 
 W, H = 720, 1280
 
-WORD_COLORS = [
-    (255, 255, 255),
-    (255, 220, 0),
-    (0, 230, 255),
-    (255, 60, 130),
-    (130, 255, 90),
-    (255, 140, 0),
-    (190, 100, 255),
-]
-
 PALETTE = [
-    {"accent": (255, 56, 100), "accent2": (255, 200, 0), "name": "fire"},
-    {"accent": (0, 220, 255), "accent2": (255, 0, 200), "name": "cyber"},
-    {"accent": (130, 60, 255), "accent2": (0, 255, 170), "name": "purple"},
+    {"accent": (255, 56, 100), "accent2": (255, 220, 0), "name": "fire"},
+    {"accent": (0, 220, 255), "accent2": (0, 255, 170), "name": "cyber"},
+    {"accent": (255, 90, 60), "accent2": (255, 230, 0), "name": "sunset"},
+    {"accent": (130, 90, 255), "accent2": (0, 245, 255), "name": "purple"},
 ]
 
 MUSIC_TRACKS = [
@@ -51,140 +42,173 @@ def ease_out_back(t):
 def load_fonts():
     base = "/usr/share/fonts/truetype/dejavu/"
     return {
-        'mega': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 76),
-        'huge': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 58),
-        'caption': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 50),
-        'small': ImageFont.truetype(base + "DejaVuSans.ttf", 28),
-        'tag': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 24),
+        'caption': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 58),
+        'hook': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 64),
+        'small': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 30),
     }
 
 
 def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
     if bg_image is None:
-        img = Image.new('RGB', (W, H), (10, 5, 25))
+        img = Image.new('RGB', (W, H), (12, 8, 28))
         d = ImageDraw.Draw(img)
         for y in range(H):
-            r = int(10 + 30 * (y / H))
-            g = int(5 + 10 * (y / H))
-            b = int(35 + 40 * (y / H))
+            r = int(12 + 28 * (y / H))
+            g = int(8 + 12 * (y / H))
+            b = int(38 + 40 * (y / H))
             d.line([(0, y), (W, y)], fill=(r, g, b))
         return img
 
     t = frame_num / max(total_frames - 1, 1)
-    zoom = 1.12 + 0.16 * t
+    # Punchier Ken Burns: slightly stronger zoom for constant motion
+    zoom = 1.14 + 0.18 * t
     new_w, new_h = int(W * zoom), int(H * zoom)
     img = bg_image.resize((new_w, new_h), Image.LANCZOS)
 
-    pan_x = math.sin(motion_seed) * 40
-    pan_y = math.cos(motion_seed) * 30
+    pan_x = math.sin(motion_seed) * 45
+    pan_y = math.cos(motion_seed) * 35
     left = int((new_w - W) / 2 + pan_x * t)
     top = int((new_h - H) / 2 + pan_y * t)
     left = max(0, min(left, new_w - W))
     top = max(0, min(top, new_h - H))
     img = img.crop((left, top, left + W, top + H))
 
-    img = ImageEnhance.Color(img).enhance(1.25)
-    img = ImageEnhance.Contrast(img).enhance(1.1)
-    img = ImageEnhance.Brightness(img).enhance(1.0)
+    # Bright, punchy, modern grade
+    img = ImageEnhance.Color(img).enhance(1.3)
+    img = ImageEnhance.Contrast(img).enhance(1.12)
+    img = ImageEnhance.Brightness(img).enhance(1.02)
     return img
 
 
-def add_subtle_grade(img):
-    """Light, modern color grade instead of old-school dark vignette."""
-    return img
+def caption_readability_band(img):
+    """Subtle dark gradient only in the lower-center so captions stay legible on any image,
+    without the heavy old-school full vignette."""
+    overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(overlay)
+    band_top = int(H * 0.42)
+    band_bot = int(H * 0.82)
+    for y in range(band_top, band_bot):
+        # bell-shaped darkening, peak in the middle of the band
+        rel = (y - band_top) / (band_bot - band_top)
+        alpha = int(120 * math.sin(rel * math.pi))
+        gd.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
+    return Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
 
 
-def draw_particles(draw, frame_num, color, count=14):
-    for i in range(count):
-        seed = i * 137.5
-        px = int((seed * 7 + frame_num * 3) % W)
-        py = int((seed * 13 + frame_num * 2) % H)
-        size = 2 + int(3 * abs(math.sin(frame_num * 0.05 + i)))
-        alpha_mult = 0.25 + 0.35 * abs(math.sin(frame_num * 0.08 + i * 2))
-        draw.ellipse([(px, py), (px + size, py + size)], fill=(*color, int(160 * alpha_mult)))
+def build_caption_groups(word_boundaries, full_text=None, voice_duration=None, words_per_group=3):
+    """Return a list of groups; each group is a list of word dicts {text, start, end}.
+    Per-word timing is retained so we can highlight the spoken word (karaoke style)."""
+    words = []
+    if word_boundaries:
+        for w in word_boundaries:
+            words.append({'text': w['text'], 'start': w['offset'], 'end': w['offset'] + w['duration']})
+    elif full_text and voice_duration and voice_duration > 1:
+        toks = full_text.split()
+        if not toks:
+            return []
+        slot = voice_duration / len(toks)
+        for i, tok in enumerate(toks):
+            words.append({'text': tok, 'start': i * slot, 'end': (i + 1) * slot})
+    else:
+        return []
+
+    groups = []
+    i = 0
+    while i < len(words):
+        size = words_per_group if (len(groups) % 3 != 2) else 2
+        chunk = words[i:i + size]
+        if not chunk:
+            break
+        groups.append(chunk)
+        i += size
+    return groups
 
 
-def draw_glow_word(draw, pos, text, font, fill, glow_radius=8):
-    """Clean modern caption style: bold outline + drop shadow, crisp and punchy (no old-school halo glow)."""
-    x, y = pos
-    # Soft drop shadow for depth
-    draw.text((x + 4, y + 6), text, font=font, fill=(0, 0, 0, 110))
-    # Crisp black outline for contrast on any background
-    outline_w = 5
-    for dx in range(-outline_w, outline_w + 1):
-        for dy in range(-outline_w, outline_w + 1):
-            if dx*dx + dy*dy <= outline_w*outline_w and (dx != 0 or dy != 0):
-                draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
-    # Bright flat color core
-    draw.text((x, y), text, font=font, fill=fill)
-
-
-def draw_tiktok_caption(draw, fonts, caption_text, frame_in_caption, total_frames_caption, base_y, color_index):
-    pop_t = min(1.0, frame_in_caption / 5)
-    scale = ease_out_back(pop_t)
-
-    color = WORD_COLORS[color_index % len(WORD_COLORS)]
+def draw_karaoke_caption(draw, fonts, group, t_sec, frame_in_group, base_y, highlight_color):
+    """Render a small word-group, big and bold, centered, with the currently spoken word highlighted."""
     font = fonts['caption']
+    line_height = 70
+    max_width = W - 120
+    space_w = draw.textlength(' ', font=font)
 
-    wrapped = textwrap.fill(caption_text.upper(), width=18)
-    lines = wrapped.split('\n')
+    # Greedy wrap into lines, keeping word objects + measured widths
+    lines = []
+    cur = []
+    cur_w = 0.0
+    for w in group:
+        wt = w['text'].upper()
+        ww = draw.textlength(wt, font=font)
+        add = ww if not cur else ww + space_w
+        if cur and cur_w + add > max_width:
+            lines.append((cur, cur_w))
+            cur = [(w, ww, wt)]
+            cur_w = ww
+        else:
+            cur.append((w, ww, wt))
+            cur_w += add
+    if cur:
+        lines.append((cur, cur_w))
 
-    line_height = 64
+    # Entrance pop (bounce up) for the first frames of the group
+    pop_t = min(1.0, frame_in_group / 5)
+    scale = ease_out_back(pop_t)
+    bounce = int((1 - scale) * 48) if pop_t < 1 else 0
+
     total_h = len(lines) * line_height
+    y = base_y - total_h // 2 - bounce
+    ow = 6  # outline width
 
-    y = base_y - total_h // 2
-    for line in lines:
-        bbox = draw.textbbox((0, 0), line, font=font)
-        line_w = bbox[2] - bbox[0]
+    for line_words, line_w in lines:
         x = (W - line_w) // 2
-        bounce_offset = int((1 - scale) * 40) if pop_t < 1 else 0
-        draw_glow_word(draw, (x, y - bounce_offset), line, font, color)
+        for (w, ww, wt) in line_words:
+            active = (w['start'] <= t_sec < w['end'])
+            color = highlight_color if active else (255, 255, 255)
+            # soft drop shadow
+            draw.text((x + 4, y + 6), wt, font=font, fill=(0, 0, 0, 120))
+            # crisp black outline for legibility on any background
+            for dx in range(-ow, ow + 1):
+                for dy in range(-ow, ow + 1):
+                    if dx * dx + dy * dy <= ow * ow and (dx or dy):
+                        draw.text((x + dx, y + dy), wt, font=font, fill=(0, 0, 0))
+            # bright core (highlighted word = accent color, pops bigger feel via lighter weight)
+            draw.text((x, y), wt, font=font, fill=color)
+            x += ww + space_w
         y += line_height
 
 
-def create_frame(bg_image, text_data, frame_num, total_frames, section, palette, motion_seed,
-                  caption_groups=None, caption_timings=None, global_frame_num=0, fps=24):
-    fonts = load_fonts()
-    accent2 = palette['accent2']
+def draw_progress_bar(draw, global_frame_num, global_total_frames, accent2):
+    prog = global_frame_num / max(global_total_frames - 1, 1)
+    draw.rectangle([0, 0, W, 8], fill=(255, 255, 255, 45))
+    draw.rectangle([0, 0, int(W * prog), 8], fill=(*accent2, 255))
 
-    # Clean bright background, no dark vignette, no old-film borders
+
+def create_frame(bg_image, frame_num, total_frames, palette, motion_seed,
+                 caption_groups=None, global_frame_num=0, global_total_frames=1, fps=24):
+    accent2 = palette['accent2']
+    fonts = load_fonts()
+
     bg = prep_background(bg_image, frame_num, total_frames, motion_seed)
-    img = bg.convert('RGB')
+    img = caption_readability_band(bg)
     draw = ImageDraw.Draw(img, 'RGBA')
 
-    # Quick clean flash only on the very first frame of the whole video (not every section)
+    # Quick clean white flash only on the very first frames of the whole video
     if global_frame_num < 3:
-        flash_alpha = int(120 * (1 - global_frame_num / 3))
-        flash = Image.new('RGBA', (W, H), (255, 255, 255, flash_alpha))
+        a = int(110 * (1 - global_frame_num / 3))
+        flash = Image.new('RGBA', (W, H), (255, 255, 255, a))
         img = Image.alpha_composite(img.convert('RGBA'), flash).convert('RGB')
         draw = ImageDraw.Draw(img, 'RGBA')
 
-    # Modern bold word-by-word captions, centered, big and clean (MrBeast/Hormozi style)
-    if caption_groups and caption_timings:
+    # Karaoke captions = the narration, word by word, in the safe zone
+    if caption_groups:
         t_sec = global_frame_num / fps
-        active_idx = None
-        for idx, (start, end) in enumerate(caption_timings):
-            if start <= t_sec < end:
-                active_idx = idx
+        for g in caption_groups:
+            if g[0]['start'] <= t_sec < g[-1]['end']:
+                frame_in = int((t_sec - g[0]['start']) * fps)
+                draw_karaoke_caption(draw, fonts, g, t_sec, frame_in, int(H * 0.56), accent2)
                 break
-        if active_idx is not None:
-            cap_start, cap_end = caption_timings[active_idx]
-            frame_in_caption = int((t_sec - cap_start) * fps)
-            total_frames_caption = max(int((cap_end - cap_start) * fps), 1)
-            draw_tiktok_caption(
-                draw, fonts, caption_groups[active_idx],
-                frame_in_caption, total_frames_caption,
-                base_y=int(H * 0.62), color_index=active_idx
-            )
 
-    if section == 'conclusion':
-        hashtags = text_data.get('hashtags', '')
-        bbox = draw.textbbox((0, 0), hashtags[:42], font=fonts['small'])
-        hx = (W - (bbox[2] - bbox[0])) // 2
-        # Simple flat pill background, no glow/pulse gimmicks
-        draw.rounded_rectangle([(hx - 16, H - 100), (hx + (bbox[2]-bbox[0]) + 16, H - 56)],
-                                radius=18, fill=(0, 0, 0, 140))
-        draw.text((hx, H - 92), hashtags[:42], font=fonts['small'], fill=(255, 255, 255))
+    # Retention progress bar at the top
+    draw_progress_bar(draw, global_frame_num, global_total_frames, accent2)
 
     return img.convert('RGB')
 
@@ -197,7 +221,7 @@ def generate_voiceover(text, output_path):
         word_boundaries = []
 
         async def _generate():
-            communicate = edge_tts.Communicate(text, voice, rate="+25%", pitch="+8Hz")
+            communicate = edge_tts.Communicate(text, voice, rate="+22%", pitch="+10Hz")
             with open(output_path, 'wb') as f:
                 async for chunk in communicate.stream():
                     if chunk["type"] == "audio":
@@ -209,8 +233,6 @@ def generate_voiceover(text, output_path):
                             'duration': chunk['duration'] / 10_000_000
                         })
 
-        # Use a fresh event loop bound to this thread (threading.Thread workers
-        # don't have a default event loop, which can break asyncio.run in some envs)
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
@@ -258,44 +280,6 @@ def download_music(tmpdir):
     return None
 
 
-def build_caption_timeline(word_boundaries, full_text=None, voice_duration=None, words_per_group=3):
-    if word_boundaries:
-        groups_text = []
-        groups_timing = []
-        i = 0
-        n = len(word_boundaries)
-        while i < n:
-            size = words_per_group if (len(groups_text) % 3 != 2) else 2
-            chunk = word_boundaries[i:i + size]
-            if not chunk:
-                break
-            text = ' '.join(w['text'] for w in chunk)
-            start = chunk[0]['offset']
-            end = chunk[-1]['offset'] + chunk[-1]['duration']
-            groups_text.append(text)
-            groups_timing.append((start, end))
-            i += size
-        return groups_text, groups_timing
-
-    # Fallback: no word-level timing available from TTS, distribute evenly across voice_duration
-    if full_text and voice_duration and voice_duration > 1:
-        words = full_text.split()
-        if not words:
-            return [], []
-        groups_text = []
-        i = 0
-        while i < len(words):
-            size = words_per_group if (len(groups_text) % 3 != 2) else 2
-            groups_text.append(' '.join(words[i:i + size]))
-            i += size
-        n_groups = len(groups_text)
-        slot = voice_duration / n_groups
-        groups_timing = [(idx * slot, (idx + 1) * slot) for idx in range(n_groups)]
-        return groups_text, groups_timing
-
-    return [], []
-
-
 def generate_video_async(job_id, script, images_b64):
     jobs[job_id]['status'] = 'processing'
     try:
@@ -312,18 +296,17 @@ def generate_video_async(job_id, script, images_b64):
             has_voice, word_boundaries = generate_voiceover(voix_off_text, voice_path)
             voice_duration = get_audio_duration(voice_path) if has_voice else None
 
-            caption_groups, caption_timings = build_caption_timeline(
+            caption_groups = build_caption_groups(
                 word_boundaries, full_text=voix_off_text, voice_duration=voice_duration, words_per_group=3
             )
             print(f"Caption groups built: {len(caption_groups)}")
 
             if voice_duration and voice_duration > 3:
-                total_duration = voice_duration + 1.5
+                total_duration = voice_duration + 1.2
             else:
-                total_duration = 25
+                total_duration = 24
 
             img_keys = ['image1', 'image2', 'image3']
-            # Cycle through images more often for more visual variety (6 micro-sections instead of 3)
             n_micro_sections = 6
             section_duration = total_duration / n_micro_sections
 
@@ -347,25 +330,20 @@ def generate_video_async(job_id, script, images_b64):
                         print(f"Image load error for {key}: {e}")
                 bgs.append(bg)
 
-            # Map 6 micro-sections to the 3 background images: 1,2,3,1,2,3 (zoom direction alternates for variety)
             micro_to_img = [0, 1, 2, 0, 1, 2]
-            section_names = ['titre', 'fait', 'fait', 'fait', 'fait', 'conclusion']
 
             for frame_num in range(total_frames):
                 t_sec = frame_num / fps
                 section_idx = min(int(t_sec / section_duration), n_micro_sections - 1)
-                section_name = section_names[section_idx]
                 bg = bgs[micro_to_img[section_idx]]
                 local_frame_num = frame_num - int(section_idx * section_duration * fps)
-                # Alternate motion seed per micro-section so the Ken Burns direction changes each time
                 local_motion_seed = motion_seed + section_idx * 1.7
 
                 frame = create_frame(
-                    bg, {'hashtags': script.get('hashtags', '')},
-                    local_frame_num, int(section_duration * fps), section_name,
+                    bg, local_frame_num, int(section_duration * fps),
                     palette, local_motion_seed,
-                    caption_groups=caption_groups, caption_timings=caption_timings,
-                    global_frame_num=frame_num, fps=fps
+                    caption_groups=caption_groups,
+                    global_frame_num=frame_num, global_total_frames=total_frames, fps=fps
                 )
                 frame.save(os.path.join(frames_dir, f'frame_{frame_num:05d}.jpg'), quality=88)
 
