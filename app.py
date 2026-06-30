@@ -11,7 +11,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 import textwrap
 import math
 import random
-from gtts import gTTS
+import asyncio
+import edge_tts
 
 app = Flask(__name__)
 jobs = {}
@@ -284,14 +285,36 @@ def create_frame(bg_image, text_data, frame_num, total_frames, section, palette,
 
 
 def generate_voiceover(text, output_path):
-    """Generate French voiceover using free Google TTS."""
+    """Generate French voiceover using free Microsoft Edge TTS (more dynamic/natural than gTTS)."""
     try:
-        tts = gTTS(text=text, lang='fr', slow=False)
-        tts.save(output_path)
-        return True
+        # Dynamic French voices: 
+        # fr-FR-HenriNeural (male, energetic), fr-FR-DeniseNeural (female, expressive)
+        voices = ["fr-FR-HenriNeural", "fr-FR-DeniseNeural"]
+        voice = random.choice(voices)
+
+        async def _generate():
+            # Add slight pitch/rate boost for more energy and excitement
+            communicate = edge_tts.Communicate(
+                text,
+                voice,
+                rate="+8%",
+                pitch="+2Hz"
+            )
+            await communicate.save(output_path)
+
+        asyncio.run(_generate())
+        return os.path.exists(output_path) and os.path.getsize(output_path) > 1000
     except Exception as e:
-        print(f"TTS error: {e}")
-        return False
+        print(f"Edge TTS error: {e}")
+        # Fallback to gTTS if edge-tts fails
+        try:
+            from gtts import gTTS
+            tts = gTTS(text=text, lang='fr', slow=False)
+            tts.save(output_path)
+            return True
+        except Exception as e2:
+            print(f"gTTS fallback error: {e2}")
+            return False
 
 
 def get_audio_duration(audio_path):
