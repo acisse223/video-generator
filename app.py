@@ -6,10 +6,12 @@ import base64
 import threading
 import uuid
 import time
+import urllib.request
 from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 import textwrap
 import math
 import random
+from gtts import gTTS
 
 app = Flask(__name__)
 jobs = {}
@@ -20,6 +22,13 @@ PALETTE = [
     {"accent": (255, 56, 100), "accent2": (255, 200, 0), "name": "fire"},
     {"accent": (0, 220, 255), "accent2": (255, 0, 200), "name": "cyber"},
     {"accent": (130, 60, 255), "accent2": (0, 255, 170), "name": "purple"},
+]
+
+# Free royalty-free background music (Pixabay CDN, no copyright)
+MUSIC_TRACKS = [
+    "https://cdn.pixabay.com/audio/2024/03/05/audio_d0c6ff1bab.mp3",
+    "https://cdn.pixabay.com/audio/2023/11/24/audio_7b3f4b1e2c.mp3",
+    "https://cdn.pixabay.com/audio/2022/10/25/audio_946bc4f4a4.mp3",
 ]
 
 
@@ -48,7 +57,6 @@ def load_fonts():
 def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
     """Ken Burns style zoom/pan + color grade + vignette."""
     if bg_image is None:
-        # Dynamic gradient fallback
         img = Image.new('RGB', (W, H), (10, 5, 25))
         d = ImageDraw.Draw(img)
         for y in range(H):
@@ -59,7 +67,6 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
         return img
 
     t = frame_num / max(total_frames - 1, 1)
-    # Ken Burns: slow zoom + slight pan, direction varies by motion_seed
     zoom_start = 1.12
     zoom_end = 1.28
     zoom = zoom_start + (zoom_end - zoom_start) * t
@@ -75,7 +82,6 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
     top = max(0, min(top, new_h - H))
     img = img.crop((left, top, left + W, top + H))
 
-    # Color grade: punchy, slightly desaturated shadows, boosted contrast
     img = ImageEnhance.Color(img).enhance(1.35)
     img = ImageEnhance.Contrast(img).enhance(1.25)
     img = ImageEnhance.Brightness(img).enhance(0.62)
@@ -160,21 +166,18 @@ def create_frame(bg_image, text_data, frame_num, total_frames, section, palette,
     img = add_vignette(img)
     draw = ImageDraw.Draw(img, 'RGBA')
 
-    # Entry animation curve
     pop_t = min(1.0, frame_num / 9)
     pop_scale = ease_out_back(pop_t)
     slide = int((1 - ease_out_expo(min(1, frame_num / 7))) * 90)
 
     draw_particles(draw, frame_num, accent2, count=16)
 
-    # Flash on entry
     if frame_num < 5:
         flash_alpha = int(180 * (1 - frame_num / 5) ** 2)
         flash = Image.new('RGBA', (W, H), (*accent, flash_alpha))
         img = Image.alpha_composite(img.convert('RGBA'), flash).convert('RGB')
         draw = ImageDraw.Draw(img, 'RGBA')
 
-    # Animated corner frame brackets (cinematic feel)
     bracket_len = 50
     bw = 5
     corners = [(20, 20, 1, 1), (W - 20, 20, -1, 1), (20, H - 20, 1, -1), (W - 20, H - 20, -1, -1)]
@@ -280,6 +283,46 @@ def create_frame(bg_image, text_data, frame_num, total_frames, section, palette,
     return img.convert('RGB')
 
 
+def generate_voiceover(text, output_path):
+    """Generate French voiceover using free Google TTS."""
+    try:
+        tts = gTTS(text=text, lang='fr', slow=False)
+        tts.save(output_path)
+        return True
+    except Exception as e:
+        print(f"TTS error: {e}")
+        return False
+
+
+def get_audio_duration(audio_path):
+    """Get duration of an audio file using ffprobe."""
+    try:
+        cmd = [
+            'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1', audio_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return float(result.stdout.strip())
+    except Exception:
+        return None
+
+
+def download_music(tmpdir):
+    """Try to download a background music track, return path or None."""
+    try:
+        url = random.choice(MUSIC_TRACKS)
+        music_path = os.path.join(tmpdir, 'music.mp3')
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15) as response:
+            with open(music_path, 'wb') as f:
+                f.write(response.read())
+        if os.path.getsize(music_path) > 1000:
+            return music_path
+    except Exception as e:
+        print(f"Music download failed: {e}")
+    return None
+
+
 def generate_video_async(job_id, script, images_b64):
     jobs[job_id]['status'] = 'processing'
     try:
@@ -287,18 +330,38 @@ def generate_video_async(job_id, script, images_b64):
         palette = random.choice(PALETTE)
         motion_seed = random.uniform(0, 6.28)
 
-        sections_config = [
-            ('titre', {'titre': script.get('titre', '')}, images_b64.get('image1'), 4.5),
-            ('fait', {'fact': script.get('fait1', ''), 'num': '1'}, images_b64.get('image1'), 5.5),
-            ('fait', {'fact': script.get('fait2', ''), 'num': '2'}, images_b64.get('image2'), 5.5),
-            ('fait', {'fact': script.get('fait3', ''), 'num': '3'}, images_b64.get('image3'), 5.5),
-            ('conclusion', {
-                'conclusion': script.get('conclusion', ''),
-                'hashtags': script.get('hashtags', '')
-            }, images_b64.get('image3'), 6.5),
-        ]
-
         with tempfile.TemporaryDirectory() as tmpdir:
+            # 1. Generate voiceover from the full narration text
+            voix_off_text = script.get('voix_off') or (
+                f"{script.get('titre', '')}. {script.get('fait1', '')} {script.get('fait2', '')} "
+                f"{script.get('fait3', '')} {script.get('conclusion', '')}"
+            )
+            voice_path = os.path.join(tmpdir, 'voice.mp3')
+            has_voice = generate_voiceover(voix_off_text, voice_path)
+            voice_duration = get_audio_duration(voice_path) if has_voice else None
+
+            # 2. Compute section durations: scale to match voiceover length if available
+            base_durations = [4.5, 5.5, 5.5, 5.5, 6.5]  # titre, fait1, fait2, fait3, conclusion
+            base_total = sum(base_durations)
+
+            if voice_duration and voice_duration > 3:
+                target_total = max(voice_duration + 1.5, 18)  # pad a little so voice finishes within video
+                scale = target_total / base_total
+                durations = [d * scale for d in base_durations]
+            else:
+                durations = base_durations
+
+            sections_config = [
+                ('titre', {'titre': script.get('titre', '')}, images_b64.get('image1'), durations[0]),
+                ('fait', {'fact': script.get('fait1', ''), 'num': '1'}, images_b64.get('image1'), durations[1]),
+                ('fait', {'fact': script.get('fait2', ''), 'num': '2'}, images_b64.get('image2'), durations[2]),
+                ('fait', {'fact': script.get('fait3', ''), 'num': '3'}, images_b64.get('image3'), durations[3]),
+                ('conclusion', {
+                    'conclusion': script.get('conclusion', ''),
+                    'hashtags': script.get('hashtags', '')
+                }, images_b64.get('image3'), durations[4]),
+            ]
+
             frames_dir = os.path.join(tmpdir, 'frames')
             os.makedirs(frames_dir)
             frame_count = 0
@@ -322,7 +385,7 @@ def generate_video_async(job_id, script, images_b64):
                     frame.save(os.path.join(frames_dir, f'frame_{frame_count:05d}.jpg'), quality=88)
                     frame_count += 1
 
-            output_path = os.path.join(tmpdir, 'video.mp4')
+            silent_video_path = os.path.join(tmpdir, 'silent_video.mp4')
             cmd = [
                 'ffmpeg', '-y',
                 '-framerate', str(fps),
@@ -331,13 +394,59 @@ def generate_video_async(job_id, script, images_b64):
                 '-preset', 'veryfast',
                 '-crf', '23',
                 '-pix_fmt', 'yuv420p',
-                output_path
+                silent_video_path
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=280)
             if result.returncode != 0:
                 jobs[job_id]['status'] = 'error'
                 jobs[job_id]['error'] = result.stderr[-500:]
                 return
+
+            # 3. Mix audio: voiceover (loud, centered) + background music (quiet, looped)
+            output_path = os.path.join(tmpdir, 'video.mp4')
+            music_path = download_music(tmpdir)
+
+            if has_voice and music_path:
+                # Voice + ducked music mixed together
+                mix_cmd = [
+                    'ffmpeg', '-y',
+                    '-i', silent_video_path,
+                    '-i', voice_path,
+                    '-stream_loop', '-1', '-i', music_path,
+                    '-filter_complex',
+                    '[2:a]volume=0.12[music];[1:a]volume=1.0[voice];[voice][music]amix=inputs=2:duration=first:dropout_transition=2[aout]',
+                    '-map', '0:v', '-map', '[aout]',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+                    '-shortest',
+                    output_path
+                ]
+                mix_result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=120)
+                if mix_result.returncode != 0:
+                    # Fallback: voice only
+                    has_voice_only = True
+                else:
+                    has_voice_only = False
+            else:
+                has_voice_only = True
+
+            if has_voice_only:
+                if has_voice:
+                    simple_cmd = [
+                        'ffmpeg', '-y',
+                        '-i', silent_video_path,
+                        '-i', voice_path,
+                        '-map', '0:v', '-map', '1:a',
+                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+                        '-shortest',
+                        output_path
+                    ]
+                    subprocess.run(simple_cmd, capture_output=True, text=True, timeout=120)
+                else:
+                    # No audio at all, just use the silent video
+                    output_path = silent_video_path
+
+            if not os.path.exists(output_path) or os.path.getsize(output_path) < 1000:
+                output_path = silent_video_path
 
             with open(output_path, 'rb') as f:
                 video_b64 = base64.b64encode(f.read()).decode('utf-8')
