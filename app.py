@@ -19,11 +19,14 @@ jobs = {}
 
 W, H = 720, 1280
 
+# ===== BRANDING: phrase signature parlée + affichée au début de chaque vidéo =====
+SIGNATURE = "Tiens-toi bien, ça va te choquer !"
+
 PALETTE = [
     {"accent": (255, 56, 100), "accent2": (255, 220, 0), "name": "fire"},
-    {"accent": (0, 220, 255), "accent2": (0, 255, 170), "name": "cyber"},
-    {"accent": (255, 90, 60), "accent2": (255, 230, 0), "name": "sunset"},
-    {"accent": (130, 90, 255), "accent2": (0, 245, 255), "name": "purple"},
+    {"accent": (0, 200, 255), "accent2": (0, 255, 170), "name": "cyber"},
+    {"accent": (255, 90, 50), "accent2": (255, 225, 0), "name": "sunset"},
+    {"accent": (140, 90, 255), "accent2": (0, 245, 255), "name": "purple"},
 ]
 
 MUSIC_TRACKS = [
@@ -43,7 +46,8 @@ def load_fonts():
     base = "/usr/share/fonts/truetype/dejavu/"
     return {
         'caption': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 58),
-        'hook': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 64),
+        'title': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 66),
+        'outro': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 60),
         'small': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 30),
     }
 
@@ -60,7 +64,6 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
         return img
 
     t = frame_num / max(total_frames - 1, 1)
-    # Punchier Ken Burns: slightly stronger zoom for constant motion
     zoom = 1.14 + 0.18 * t
     new_w, new_h = int(W * zoom), int(H * zoom)
     img = bg_image.resize((new_w, new_h), Image.LANCZOS)
@@ -73,7 +76,6 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
     top = max(0, min(top, new_h - H))
     img = img.crop((left, top, left + W, top + H))
 
-    # Bright, punchy, modern grade
     img = ImageEnhance.Color(img).enhance(1.3)
     img = ImageEnhance.Contrast(img).enhance(1.12)
     img = ImageEnhance.Brightness(img).enhance(1.02)
@@ -81,37 +83,41 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
 
 
 def caption_readability_band(img):
-    """Subtle dark gradient only in the lower-center so captions stay legible on any image,
-    without the heavy old-school full vignette."""
     overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     gd = ImageDraw.Draw(overlay)
-    band_top = int(H * 0.42)
-    band_bot = int(H * 0.82)
+    band_top = int(H * 0.30)
+    band_bot = int(H * 0.84)
     for y in range(band_top, band_bot):
-        # bell-shaped darkening, peak in the middle of the band
         rel = (y - band_top) / (band_bot - band_top)
-        alpha = int(120 * math.sin(rel * math.pi))
+        alpha = int(125 * math.sin(rel * math.pi))
         gd.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
     return Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
 
 
-def build_caption_groups(word_boundaries, full_text=None, voice_duration=None, words_per_group=3):
-    """Return a list of groups; each group is a list of word dicts {text, start, end}.
-    Per-word timing is retained so we can highlight the spoken word (karaoke style)."""
-    words = []
+def draw_outlined_text(draw, x, y, text, font, fill, outline_w=6, shadow=True):
+    if shadow:
+        draw.text((x + 4, y + 6), text, font=font, fill=(0, 0, 0, 120))
+    for dx in range(-outline_w, outline_w + 1):
+        for dy in range(-outline_w, outline_w + 1):
+            if dx * dx + dy * dy <= outline_w * outline_w and (dx or dy):
+                draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def words_with_timing(word_boundaries, full_text, voice_duration):
     if word_boundaries:
-        for w in word_boundaries:
-            words.append({'text': w['text'], 'start': w['offset'], 'end': w['offset'] + w['duration']})
-    elif full_text and voice_duration and voice_duration > 1:
+        return [{'text': w['text'], 'start': w['offset'], 'end': w['offset'] + w['duration']}
+                for w in word_boundaries]
+    if full_text and voice_duration and voice_duration > 1:
         toks = full_text.split()
         if not toks:
             return []
         slot = voice_duration / len(toks)
-        for i, tok in enumerate(toks):
-            words.append({'text': tok, 'start': i * slot, 'end': (i + 1) * slot})
-    else:
-        return []
+        return [{'text': t, 'start': i * slot, 'end': (i + 1) * slot} for i, t in enumerate(toks)]
+    return []
 
+
+def group_words(words, words_per_group=3):
     groups = []
     i = 0
     while i < len(words):
@@ -124,14 +130,50 @@ def build_caption_groups(word_boundaries, full_text=None, voice_duration=None, w
     return groups
 
 
+def draw_title_card(draw, fonts, title, t_elapsed, palette):
+    """Intro: shows the SUBJECT clearly + the signature catchphrase, animated."""
+    accent = palette['accent']
+    accent2 = palette['accent2']
+    pop = ease_out_back(min(1.0, t_elapsed / 0.45))
+
+    # Signature brand line in an accent pill
+    sig = SIGNATURE.upper()
+    sf = fonts['small']
+    sb = draw.textbbox((0, 0), sig, font=sf)
+    sw = sb[2] - sb[0]
+    sy = int(H * 0.30)
+    draw.rounded_rectangle([(W // 2 - sw // 2 - 22, sy - 8), (W // 2 + sw // 2 + 22, sy + 46)],
+                           radius=24, fill=(*accent, 235))
+    draw.text((W // 2 - sw // 2, sy), sig, font=sf, fill=(255, 255, 255))
+
+    # Big title (the subject), wrapped + bounce-in
+    tf = fonts['title']
+    wrapped = textwrap.fill(title.upper(), width=13)
+    lines = wrapped.split('\n')
+    lh = 78
+    bounce = int((1 - pop) * 60)
+    ty = int(H * 0.46) - (len(lines) * lh) // 2 - bounce
+    last_y = ty
+    for line in lines:
+        bb = draw.textbbox((0, 0), line, font=tf)
+        lw = bb[2] - bb[0]
+        x = (W - lw) // 2
+        draw_outlined_text(draw, x, ty, line, tf, (255, 255, 255), outline_w=6)
+        last_y = ty
+        ty += lh
+
+    # Accent underline expanding in
+    uw = int(min(1.0, pop) * (W - 180))
+    uy = last_y + lh + 6
+    draw.rounded_rectangle([((W - uw) // 2, uy), ((W + uw) // 2, uy + 12)], radius=6, fill=accent2)
+
+
 def draw_karaoke_caption(draw, fonts, group, t_sec, frame_in_group, base_y, highlight_color):
-    """Render a small word-group, big and bold, centered, with the currently spoken word highlighted."""
     font = fonts['caption']
     line_height = 70
     max_width = W - 120
     space_w = draw.textlength(' ', font=font)
 
-    # Greedy wrap into lines, keeping word objects + measured widths
     lines = []
     cur = []
     cur_w = 0.0
@@ -149,31 +191,45 @@ def draw_karaoke_caption(draw, fonts, group, t_sec, frame_in_group, base_y, high
     if cur:
         lines.append((cur, cur_w))
 
-    # Entrance pop (bounce up) for the first frames of the group
     pop_t = min(1.0, frame_in_group / 5)
     scale = ease_out_back(pop_t)
     bounce = int((1 - scale) * 48) if pop_t < 1 else 0
 
     total_h = len(lines) * line_height
     y = base_y - total_h // 2 - bounce
-    ow = 6  # outline width
 
     for line_words, line_w in lines:
         x = (W - line_w) // 2
         for (w, ww, wt) in line_words:
             active = (w['start'] <= t_sec < w['end'])
             color = highlight_color if active else (255, 255, 255)
-            # soft drop shadow
-            draw.text((x + 4, y + 6), wt, font=font, fill=(0, 0, 0, 120))
-            # crisp black outline for legibility on any background
-            for dx in range(-ow, ow + 1):
-                for dy in range(-ow, ow + 1):
-                    if dx * dx + dy * dy <= ow * ow and (dx or dy):
-                        draw.text((x + dx, y + dy), wt, font=font, fill=(0, 0, 0))
-            # bright core (highlighted word = accent color, pops bigger feel via lighter weight)
-            draw.text((x, y), wt, font=font, fill=color)
+            draw_outlined_text(draw, int(x), int(y), wt, font, color, outline_w=6)
             x += ww + space_w
         y += line_height
+
+
+def draw_outro_card(draw, fonts, t_elapsed, palette):
+    """Clear ending so the video doesn't cut abruptly."""
+    accent = palette['accent']
+    accent2 = palette['accent2']
+    pop = ease_out_back(min(1.0, t_elapsed / 0.4))
+    bounce = int((1 - pop) * 50)
+
+    of = fonts['outro']
+    main = "ABONNE-TOI"
+    bb = draw.textbbox((0, 0), main, font=of)
+    lw = bb[2] - bb[0]
+    cy = int(H * 0.42) - bounce
+    pad = 44
+    draw.rounded_rectangle([((W - lw) // 2 - pad, cy - 18), ((W + lw) // 2 + pad, cy + 92)],
+                           radius=46, fill=(*accent, 240))
+    draw.text(((W - lw) // 2, cy), main, font=of, fill=(255, 255, 255))
+
+    sub = "POUR PLUS DE FAITS FOUS"
+    sf = fonts['small']
+    sbb = draw.textbbox((0, 0), sub, font=sf)
+    sw = sbb[2] - sbb[0]
+    draw_outlined_text(draw, (W - sw) // 2, cy + 118, sub, sf, accent2, outline_w=5)
 
 
 def draw_progress_bar(draw, global_frame_num, global_total_frames, accent2):
@@ -183,7 +239,8 @@ def draw_progress_bar(draw, global_frame_num, global_total_frames, accent2):
 
 
 def create_frame(bg_image, frame_num, total_frames, palette, motion_seed,
-                 caption_groups=None, global_frame_num=0, global_total_frames=1, fps=24):
+                 title='', caption_groups=None, intro_end=1.8, voice_end=20.0,
+                 global_frame_num=0, global_total_frames=1, fps=24):
     accent2 = palette['accent2']
     fonts = load_fonts()
 
@@ -191,68 +248,78 @@ def create_frame(bg_image, frame_num, total_frames, palette, motion_seed,
     img = caption_readability_band(bg)
     draw = ImageDraw.Draw(img, 'RGBA')
 
-    # Quick clean white flash only on the very first frames of the whole video
     if global_frame_num < 3:
         a = int(110 * (1 - global_frame_num / 3))
         flash = Image.new('RGBA', (W, H), (255, 255, 255, a))
         img = Image.alpha_composite(img.convert('RGBA'), flash).convert('RGB')
         draw = ImageDraw.Draw(img, 'RGBA')
 
-    # Karaoke captions = the narration, word by word, in the safe zone
-    if caption_groups:
-        t_sec = global_frame_num / fps
-        for g in caption_groups:
-            if g[0]['start'] <= t_sec < g[-1]['end']:
-                frame_in = int((t_sec - g[0]['start']) * fps)
-                draw_karaoke_caption(draw, fonts, g, t_sec, frame_in, int(H * 0.56), accent2)
-                break
+    t = global_frame_num / fps
 
-    # Retention progress bar at the top
+    if t < intro_end:
+        # Intro: subject + signature
+        draw_title_card(draw, fonts, title, t, palette)
+    elif t < voice_end:
+        # Karaoke narration
+        if caption_groups:
+            for g in caption_groups:
+                if g[0]['start'] <= t < g[-1]['end']:
+                    frame_in = int((t - g[0]['start']) * fps)
+                    draw_karaoke_caption(draw, fonts, g, t, frame_in, int(H * 0.56), accent2)
+                    break
+    else:
+        # Clear outro
+        draw_outro_card(draw, fonts, t - voice_end, palette)
+
     draw_progress_bar(draw, global_frame_num, global_total_frames, accent2)
-
     return img.convert('RGB')
 
 
 def generate_voiceover(text, output_path):
-    """Generate French voiceover using free Microsoft Edge TTS, returns (success, word_timings)."""
+    """Expressive French voiceover via Edge TTS multilingual voices, with fallbacks.
+    Returns (success, word_timings)."""
+    primary = random.choice(["fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural"])
+    voice_order = [primary, "fr-FR-HenriNeural", "fr-FR-DeniseNeural"]
+
+    for voice in voice_order:
+        try:
+            word_boundaries = []
+
+            async def _generate():
+                communicate = edge_tts.Communicate(text, voice, rate="+18%", pitch="+8Hz")
+                with open(output_path, 'wb') as f:
+                    async for chunk in communicate.stream():
+                        if chunk["type"] == "audio":
+                            f.write(chunk["data"])
+                        elif chunk["type"] == "WordBoundary":
+                            word_boundaries.append({
+                                'text': chunk['text'],
+                                'offset': chunk['offset'] / 10_000_000,
+                                'duration': chunk['duration'] / 10_000_000
+                            })
+
+            loop = asyncio.new_event_loop()
+            try:
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(_generate())
+            finally:
+                loop.close()
+
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 1000:
+                print(f"Edge TTS OK voice={voice}, words={len(word_boundaries)}")
+                return True, word_boundaries
+        except Exception as e:
+            print(f"Edge TTS failed for {voice}: {e}")
+            continue
+
+    # Last resort: gTTS (flat, no word timing)
     try:
-        voices = ["fr-FR-HenriNeural", "fr-FR-DeniseNeural"]
-        voice = random.choice(voices)
-        word_boundaries = []
-
-        async def _generate():
-            communicate = edge_tts.Communicate(text, voice, rate="+22%", pitch="+10Hz")
-            with open(output_path, 'wb') as f:
-                async for chunk in communicate.stream():
-                    if chunk["type"] == "audio":
-                        f.write(chunk["data"])
-                    elif chunk["type"] == "WordBoundary":
-                        word_boundaries.append({
-                            'text': chunk['text'],
-                            'offset': chunk['offset'] / 10_000_000,
-                            'duration': chunk['duration'] / 10_000_000
-                        })
-
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            loop.run_until_complete(_generate())
-        finally:
-            loop.close()
-
-        success = os.path.exists(output_path) and os.path.getsize(output_path) > 1000
-        print(f"Edge TTS: success={success}, word_boundaries_count={len(word_boundaries)}")
-        return success, word_boundaries
-    except Exception as e:
-        print(f"Edge TTS error: {e}")
-        try:
-            from gtts import gTTS
-            tts = gTTS(text=text, lang='fr', slow=False)
-            tts.save(output_path)
-            return True, []
-        except Exception as e2:
-            print(f"gTTS fallback error: {e2}")
-            return False, []
+        from gtts import gTTS
+        gTTS(text=text, lang='fr', slow=False).save(output_path)
+        return True, []
+    except Exception as e2:
+        print(f"gTTS fallback error: {e2}")
+        return False, []
 
 
 def get_audio_duration(audio_path):
@@ -286,37 +353,44 @@ def generate_video_async(job_id, script, images_b64):
         fps = 24
         palette = random.choice(PALETTE)
         motion_seed = random.uniform(0, 6.28)
+        OUTRO_DURATION = 2.4
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            voix_off_text = script.get('voix_off') or (
+            narration = script.get('voix_off') or (
                 f"{script.get('titre', '')}. {script.get('fait1', '')} {script.get('fait2', '')} "
                 f"{script.get('fait3', '')} {script.get('conclusion', '')}"
             )
+            # Spoken text = signature catchphrase + narration
+            full_text = f"{SIGNATURE} {narration}"
+            title = script.get('titre', 'LE SAVAIS-TU')
+
             voice_path = os.path.join(tmpdir, 'voice.mp3')
-            has_voice, word_boundaries = generate_voiceover(voix_off_text, voice_path)
+            has_voice, word_boundaries = generate_voiceover(full_text, voice_path)
             voice_duration = get_audio_duration(voice_path) if has_voice else None
 
-            caption_groups = build_caption_groups(
-                word_boundaries, full_text=voix_off_text, voice_duration=voice_duration, words_per_group=3
-            )
-            print(f"Caption groups built: {len(caption_groups)}")
+            words = words_with_timing(word_boundaries, full_text, voice_duration)
+            n_sig = len(SIGNATURE.split())
+            narration_words = words[n_sig:] if len(words) > n_sig else words
+            caption_groups = group_words(narration_words, words_per_group=3)
 
-            if voice_duration and voice_duration > 3:
-                total_duration = voice_duration + 1.2
+            # Intro lasts until the narration's first word starts (i.e. while signature is spoken)
+            if narration_words:
+                intro_end = max(1.2, min(narration_words[0]['start'], 3.0))
             else:
-                total_duration = 24
+                intro_end = 1.8
 
-            img_keys = ['image1', 'image2', 'image3']
+            voice_end = voice_duration if (voice_duration and voice_duration > 3) else 20.0
+            total_duration = voice_end + OUTRO_DURATION
+
             n_micro_sections = 6
             section_duration = total_duration / n_micro_sections
+            total_frames = int(total_duration * fps)
 
             frames_dir = os.path.join(tmpdir, 'frames')
             os.makedirs(frames_dir)
 
-            total_frames = int(total_duration * fps)
-
             bgs = []
-            for key in img_keys:
+            for key in ['image1', 'image2', 'image3']:
                 b64v = images_b64.get(key)
                 bg = None
                 if b64v and len(b64v) > 100:
@@ -342,7 +416,8 @@ def generate_video_async(job_id, script, images_b64):
                 frame = create_frame(
                     bg, local_frame_num, int(section_duration * fps),
                     palette, local_motion_seed,
-                    caption_groups=caption_groups,
+                    title=title, caption_groups=caption_groups,
+                    intro_end=intro_end, voice_end=voice_end,
                     global_frame_num=frame_num, global_total_frames=total_frames, fps=fps
                 )
                 frame.save(os.path.join(frames_dir, f'frame_{frame_num:05d}.jpg'), quality=88)
@@ -363,24 +438,30 @@ def generate_video_async(job_id, script, images_b64):
             output_path = os.path.join(tmpdir, 'video.mp4')
             music_path = download_music(tmpdir)
             mixed_ok = False
+            fade_start = max(0.1, total_duration - 1.0)
+            dur_str = f"{total_duration:.2f}"
 
             if has_voice and music_path:
+                flt = (
+                    f"[2:a]volume=0.10[m];[1:a]volume=1.0[v];"
+                    f"[v][m]amix=inputs=2:duration=longest:dropout_transition=2[mix];"
+                    f"[mix]afade=t=out:st={fade_start:.2f}:d=1.0[aout]"
+                )
                 mix_cmd = [
                     'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
                     '-stream_loop', '-1', '-i', music_path,
-                    '-filter_complex',
-                    '[2:a]volume=0.12[music];[1:a]volume=1.0[voice];[voice][music]amix=inputs=2:duration=first:dropout_transition=2[aout]',
-                    '-map', '0:v', '-map', '[aout]',
-                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', output_path
+                    '-filter_complex', flt, '-map', '0:v', '-map', '[aout]',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', dur_str, output_path
                 ]
                 mix_result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=120)
                 mixed_ok = mix_result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
 
             if not mixed_ok and has_voice:
+                flt2 = f"[1:a]afade=t=out:st={fade_start:.2f}:d=1.0[aout]"
                 simple_cmd = [
                     'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
-                    '-map', '0:v', '-map', '1:a',
-                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-shortest', output_path
+                    '-filter_complex', flt2, '-map', '0:v', '-map', '[aout]',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', dur_str, output_path
                 ]
                 subprocess.run(simple_cmd, capture_output=True, text=True, timeout=120)
                 mixed_ok = os.path.exists(output_path) and os.path.getsize(output_path) > 1000
