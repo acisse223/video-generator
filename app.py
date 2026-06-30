@@ -6,8 +6,7 @@ import base64
 import threading
 import uuid
 import time
-import urllib.request
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
 import textwrap
 import math
 import random
@@ -15,205 +14,268 @@ import random
 app = Flask(__name__)
 jobs = {}
 
+W, H = 720, 1280
+
+PALETTE = [
+    {"accent": (255, 56, 100), "accent2": (255, 200, 0), "name": "fire"},
+    {"accent": (0, 220, 255), "accent2": (255, 0, 200), "name": "cyber"},
+    {"accent": (130, 60, 255), "accent2": (0, 255, 170), "name": "purple"},
+]
+
+
 def ease_out_back(t):
     c1 = 1.70158
     c3 = c1 + 1
     return 1 + c3 * pow(t - 1, 3) + c1 * pow(t - 1, 2)
 
-def ease_out_elastic(t):
-    if t == 0 or t == 1:
-        return t
-    c4 = (2 * math.pi) / 3
-    return pow(2, -10 * t) * math.sin((t * 10 - 0.75) * c4) + 1
 
-def ease_out_cubic(t):
-    return 1 - pow(1 - t, 3)
+def ease_out_expo(t):
+    return 1 if t == 1 else 1 - pow(2, -10 * t)
 
-def create_dynamic_frame(bg_image, text_data, frame_num, total_frames, section, prev_bg=None, transition_frames=6):
-    width, height = 720, 1280
+
+def load_fonts():
+    base = "/usr/share/fonts/truetype/dejavu/"
+    return {
+        'mega': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 84),
+        'huge': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 60),
+        'title': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 46),
+        'body': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 38),
+        'small': ImageFont.truetype(base + "DejaVuSans.ttf", 28),
+        'tag': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 26),
+    }
+
+
+def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
+    """Ken Burns style zoom/pan + color grade + vignette."""
+    if bg_image is None:
+        # Dynamic gradient fallback
+        img = Image.new('RGB', (W, H), (10, 5, 25))
+        d = ImageDraw.Draw(img)
+        for y in range(H):
+            r = int(10 + 30 * (y / H))
+            g = int(5 + 10 * (y / H))
+            b = int(35 + 40 * (y / H))
+            d.line([(0, y), (W, y)], fill=(r, g, b))
+        return img
+
     t = frame_num / max(total_frames - 1, 1)
+    # Ken Burns: slow zoom + slight pan, direction varies by motion_seed
+    zoom_start = 1.12
+    zoom_end = 1.28
+    zoom = zoom_start + (zoom_end - zoom_start) * t
 
-    # Background with constant subtle shake + zoom for energy
-    shake_x = int(3 * math.sin(frame_num * 0.8))
-    shake_y = int(2 * math.cos(frame_num * 0.6))
-    zoom = 1.08 + 0.04 * math.sin(frame_num * 0.15)
+    new_w, new_h = int(W * zoom), int(H * zoom)
+    img = bg_image.resize((new_w, new_h), Image.LANCZOS)
 
-    if bg_image:
-        bg = bg_image.copy()
-        new_w = int(width * zoom)
-        new_h = int(height * zoom)
-        bg = bg.resize((new_w, new_h), Image.LANCZOS)
-        left = (new_w - width) // 2 + shake_x
-        top = (new_h - height) // 2 + shake_y
-        left = max(0, min(left, new_w - width))
-        top = max(0, min(top, new_h - height))
-        bg = bg.crop((left, top, left + width, top + height))
-        enhancer = ImageEnhance.Brightness(bg)
-        bg = enhancer.enhance(0.5)
-        enhancer = ImageEnhance.Color(bg)
-        bg = enhancer.enhance(1.3)
-        enhancer = ImageEnhance.Contrast(bg)
-        bg = enhancer.enhance(1.15)
-    else:
-        bg = Image.new('RGB', (width, height), (15, 10, 30))
+    pan_x = math.sin(motion_seed) * 40
+    pan_y = math.cos(motion_seed) * 30
+    left = int((new_w - W) / 2 + pan_x * t)
+    top = int((new_h - H) / 2 + pan_y * t)
+    left = max(0, min(left, new_w - W))
+    top = max(0, min(top, new_h - H))
+    img = img.crop((left, top, left + W, top + H))
 
-    img = bg.convert('RGBA')
+    # Color grade: punchy, slightly desaturated shadows, boosted contrast
+    img = ImageEnhance.Color(img).enhance(1.35)
+    img = ImageEnhance.Contrast(img).enhance(1.25)
+    img = ImageEnhance.Brightness(img).enhance(0.62)
 
-    # Flash transition at start of section
-    if frame_num < transition_frames:
-        flash_t = 1 - (frame_num / transition_frames)
-        flash_alpha = int(255 * flash_t * flash_t)
-        flash_color = random.choice([(255, 255, 255), (255, 50, 100), (255, 220, 0)])
-        flash = Image.new('RGBA', (width, height), (*flash_color, flash_alpha))
-        img = Image.alpha_composite(img, flash)
+    return img
 
-    # Bottom gradient for text readability
-    gradient = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-    gd = ImageDraw.Draw(gradient)
-    for y in range(height // 3, height):
-        alpha = int(190 * ((y - height // 3) / (height - height // 3)))
-        gd.line([(0, y), (width, y)], fill=(0, 0, 0, alpha))
-    img = Image.alpha_composite(img, gradient)
-    img = img.convert('RGB')
-    draw = ImageDraw.Draw(img)
 
-    try:
-        f_huge = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 72)
-        f_title = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 50)
-        f_body = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 38)
-        f_small = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", 26)
-        f_tag = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 24)
-    except:
-        f_huge = f_title = f_body = f_small = f_tag = ImageFont.load_default()
+def add_vignette(img):
+    vignette = Image.new('L', (W, H), 0)
+    vd = ImageDraw.Draw(vignette)
+    vd.ellipse([-W*0.3, -H*0.3, W*1.3, H*1.3], fill=255)
+    vignette = vignette.filter(ImageFilter.GaussianBlur(150))
+    black = Image.new('RGB', (W, H), (0, 0, 0))
+    img = Image.composite(img, black, vignette)
+    return img
 
-    # Animated rotating speed lines (always present, subtle)
-    cx, cy = width // 2, 200
-    for angle in range(0, 360, 20):
-        rad = math.radians(angle + frame_num * 3)
-        length = 150 + 30 * math.sin(math.radians(frame_num * 10 + angle))
+
+def draw_bottom_gradient(img, strength=210):
+    overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(overlay)
+    start_y = int(H * 0.30)
+    for y in range(start_y, H):
+        alpha = int(strength * ((y - start_y) / (H - start_y)) ** 1.3)
+        gd.line([(0, y), (W, y)], fill=(5, 0, 15, alpha))
+    return Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+
+
+def draw_top_gradient(img, strength=140):
+    overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
+    gd = ImageDraw.Draw(overlay)
+    end_y = int(H * 0.30)
+    for y in range(0, end_y):
+        alpha = int(strength * (1 - y / end_y))
+        gd.line([(0, y), (W, y)], fill=(5, 0, 15, alpha))
+    return Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+
+
+def draw_glow_text(draw, pos, text, font, fill, glow_color, glow_radius=3):
+    x, y = pos
+    for dx in range(-glow_radius, glow_radius + 1):
+        for dy in range(-glow_radius, glow_radius + 1):
+            if dx * dx + dy * dy <= glow_radius * glow_radius:
+                draw.text((x + dx, y + dy), text, font=font, fill=(*glow_color, 40))
+    draw.text((x + 3, y + 3), text, font=font, fill=(0, 0, 0))
+    draw.text((x, y), text, font=font, fill=fill)
+
+
+def draw_particles(draw, frame_num, color, count=14):
+    for i in range(count):
+        seed = i * 137.5
+        px = int((seed * 7 + frame_num * 3) % W)
+        py = int((seed * 13 + frame_num * 2) % H)
+        size = 2 + int(3 * abs(math.sin(frame_num * 0.05 + i)))
+        alpha_mult = 0.3 + 0.4 * abs(math.sin(frame_num * 0.08 + i * 2))
+        c = (*color, int(180 * alpha_mult))
+        draw.ellipse([(px, py), (px + size, py + size)], fill=c)
+
+
+def draw_speed_lines(draw, frame_num, cx, cy, color):
+    for angle in range(0, 360, 18):
+        rad = math.radians(angle + frame_num * 2.5)
+        length = 120 + 50 * math.sin(math.radians(frame_num * 8 + angle))
         x2 = cx + int(math.cos(rad) * length)
         y2 = cy + int(math.sin(rad) * length)
-        alpha_line = int(40 + 20 * math.sin(frame_num * 0.3))
-        draw.line([(cx, cy), (x2, y2)], fill=(255, 220, 100), width=2)
+        draw.line([(cx, cy), (x2, y2)], fill=(*color, 55), width=2)
 
-    # Entry animation: pop + bounce (first 10 frames of section)
-    pop_progress = min(1.0, frame_num / 10)
-    pop_scale = ease_out_back(pop_progress)
-    entry_offset_y = int((1 - min(1, frame_num / 8)) * 60)
 
-    # Floating particles for energy
-    for i in range(8):
-        px = (i * 90 + frame_num * 4) % width
-        py = int(100 + 200 * math.sin(frame_num * 0.1 + i * 2))
-        psize = 3 + int(2 * math.sin(frame_num * 0.2 + i))
-        draw.ellipse([(px, py), (px + psize, py + psize)], fill=(255, 220, 100, 150))
+def create_frame(bg_image, text_data, frame_num, total_frames, section, palette, motion_seed):
+    fonts = load_fonts()
+    accent = palette['accent']
+    accent2 = palette['accent2']
+
+    bg = prep_background(bg_image, frame_num, total_frames, motion_seed)
+    img = bg.convert('RGBA')
+
+    overlay = Image.new('RGBA', (W, H), (*accent, 18))
+    img = Image.alpha_composite(img, overlay)
+    img = img.convert('RGB')
+
+    img = draw_bottom_gradient(img)
+    img = draw_top_gradient(img)
+    img = add_vignette(img)
+    draw = ImageDraw.Draw(img, 'RGBA')
+
+    # Entry animation curve
+    pop_t = min(1.0, frame_num / 9)
+    pop_scale = ease_out_back(pop_t)
+    slide = int((1 - ease_out_expo(min(1, frame_num / 7))) * 90)
+
+    draw_particles(draw, frame_num, accent2, count=16)
+
+    # Flash on entry
+    if frame_num < 5:
+        flash_alpha = int(180 * (1 - frame_num / 5) ** 2)
+        flash = Image.new('RGBA', (W, H), (*accent, flash_alpha))
+        img = Image.alpha_composite(img.convert('RGBA'), flash).convert('RGB')
+        draw = ImageDraw.Draw(img, 'RGBA')
+
+    # Animated corner frame brackets (cinematic feel)
+    bracket_len = 50
+    bw = 5
+    corners = [(20, 20, 1, 1), (W - 20, 20, -1, 1), (20, H - 20, 1, -1), (W - 20, H - 20, -1, -1)]
+    for cxp, cyp, sx, sy in corners:
+        draw.line([(cxp, cyp), (cxp + sx * bracket_len, cyp)], fill=(*accent, 220), width=bw)
+        draw.line([(cxp, cyp), (cxp, cyp + sy * bracket_len)], fill=(*accent, 220), width=bw)
 
     if section == 'titre':
-        # Pulsing badge
-        pulse = 1 + 0.1 * math.sin(frame_num * 0.4)
-        badge_w = int(220 * pulse)
-        draw.rounded_rectangle([(40, 60 - entry_offset_y), (40 + badge_w, 110 - entry_offset_y)],
-                                radius=25, fill=(255, 50, 100))
-        draw.text((58, 70 - entry_offset_y), "⚡ LE SAVIEZ-VOUS ?", font=f_tag, fill=(255, 255, 255))
+        draw_speed_lines(draw, frame_num, W // 2, 240, accent2)
+
+        badge_w = int(260 * pop_scale)
+        bx, by = 40, 70 - slide
+        draw.rounded_rectangle([(bx, by), (bx + badge_w, by + 56)], radius=28, fill=accent)
+        if pop_t > 0.4:
+            draw.text((bx + 22, by + 13), "⚡ FAIT CHOC", font=fonts['tag'], fill=(255, 255, 255))
 
         titre = text_data.get('titre', '')
-        wrapped = textwrap.fill(titre, width=18)
-        title_y = 140 - entry_offset_y
+        wrapped = textwrap.fill(titre, width=15)
+        title_y = 160 - slide
 
-        # Vibrating shadow for energy
-        vibrate = int(2 * math.sin(frame_num * 0.5))
-        draw.text((54 + vibrate, title_y + 4), wrapped, font=f_huge, fill=(255, 50, 100))
-        draw.text((50, title_y), wrapped, font=f_huge, fill=(255, 240, 50))
+        for i, line in enumerate(wrapped.split('\n')):
+            line_y = title_y + i * 96
+            draw_glow_text(draw, (44, line_y), line, fonts['mega'], (255, 255, 255), accent2, glow_radius=2)
 
-        lines_count = len(wrapped.split('\n'))
-        line_y = title_y + lines_count * 82 + 30
-        line_w = int((width - 100) * pop_scale)
-        draw.rounded_rectangle([(50, line_y), (50 + max(0, line_w), line_y + 8)], radius=4, fill=(255, 50, 100))
+        lines_n = len(wrapped.split('\n'))
+        line_y = title_y + lines_n * 96 + 20
+        bar_w = int((W - 88) * pop_scale)
+        draw.rounded_rectangle([(44, line_y), (44 + bar_w, line_y + 10)], radius=5, fill=accent2)
 
-        # Bottom hook text
-        draw.text((50, height - 180), "Tu ne vas pas y croire... ⬇", font=f_body, fill=(255, 255, 255))
+        if frame_num > total_frames * 0.5:
+            hook_alpha = min(255, int((frame_num - total_frames * 0.5) / (total_frames * 0.3) * 255))
+            hook_text = "Regarde jusqu'au bout 👀"
+            draw.text((44, H - 140), hook_text, font=fonts['body'], fill=(255, 255, 255, hook_alpha))
 
     elif section == 'fait':
         num = text_data.get('num', '1')
-        colors = [(255, 50, 100), (50, 150, 255), (50, 220, 130)]
-        badge_color = colors[int(num) - 1] if num.isdigit() and int(num) <= 3 else colors[0]
+        idx = int(num) - 1 if num.isdigit() else 0
 
-        # Bouncy number badge
-        badge_size = int(90 * pop_scale)
-        bx, by = 50, 70 - entry_offset_y
-        draw.ellipse([(bx, by), (bx + badge_size, by + badge_size)], fill=badge_color)
-        draw.text((bx + badge_size//2 - 18, by + badge_size//2 - 25), num, font=f_title, fill=(255, 255, 255))
+        draw_speed_lines(draw, frame_num, 100, 130, accent2)
 
-        # "FAIT" label next to badge
-        draw.text((bx + badge_size + 20, by + 20), f"FAIT #{num}", font=f_body, fill=(255, 255, 255))
+        badge_size = int(100 * pop_scale)
+        bx, by = 40, 60 - slide
+        draw.ellipse([(bx, by), (bx + badge_size, by + badge_size)], fill=accent, outline=(255, 255, 255), width=4)
+        draw.text((bx + badge_size // 2 - 16, by + badge_size // 2 - 28), num, font=fonts['huge'], fill=(255, 255, 255))
+
+        draw.rounded_rectangle([(bx + badge_size + 16, by + 22), (bx + badge_size + 240, by + 70)], radius=24, fill=(0, 0, 0, 180))
+        draw.text((bx + badge_size + 34, by + 30), f"FAIT N°{num}", font=fonts['tag'], fill=accent2)
 
         fact = text_data.get('fact', '')
-        wrapped = textwrap.fill(fact, width=26)
-        fact_y = 200 - entry_offset_y
+        wrapped = textwrap.fill(fact, width=23)
+        fact_y = 220 - slide
         lines = wrapped.split('\n')
-        box_h = len(lines) * 54 + 50
+        box_h = len(lines) * 58 + 56
 
-        overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-        od = ImageDraw.Draw(overlay)
-        box_alpha = int(180 * min(1, pop_progress * 2))
-        od.rounded_rectangle([(30, fact_y - 25), (690, fact_y + box_h)], radius=25, fill=(10, 10, 20, box_alpha))
-        od.rounded_rectangle([(30, fact_y - 25), (690, fact_y + box_h)], radius=25, outline=badge_color, width=4)
-        img2 = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
-        img.paste(img2)
-        draw = ImageDraw.Draw(img)
+        box_alpha = int(195 * min(1, pop_t * 1.6))
+        draw.rounded_rectangle([(36, fact_y - 28), (W - 36, fact_y - 28 + box_h)], radius=28, fill=(8, 5, 18, box_alpha))
+        draw.rounded_rectangle([(36, fact_y - 28), (W - 36, fact_y - 28 + box_h)], radius=28, outline=accent, width=3)
 
-        draw.text((54, fact_y + 4), wrapped, font=f_body, fill=(0, 0, 0))
-        draw.text((50, fact_y), wrapped, font=f_body, fill=(255, 255, 255))
+        for i, line in enumerate(lines):
+            draw_glow_text(draw, (60, fact_y + i * 58), line, fonts['body'], (255, 255, 255), accent, glow_radius=1)
 
-        # Progress dots
-        dots_y = height - 120
+        dots_y = H - 100
         for i in range(3):
-            dot_x = width // 2 - 60 + i * 60
-            is_active = (i == int(num) - 1)
-            dot_color = badge_color if is_active else (100, 100, 100)
-            dot_r = 12 if is_active else 8
-            draw.ellipse([(dot_x - dot_r, dots_y - dot_r), (dot_x + dot_r, dots_y + dot_r)], fill=dot_color)
+            dot_x = W // 2 - 56 + i * 56
+            active = (i == idx)
+            r = 13 if active else 8
+            color = accent if active else (90, 90, 100)
+            draw.ellipse([(dot_x - r, dots_y - r), (dot_x + r, dots_y + r)], fill=color)
+            if active:
+                draw.ellipse([(dot_x - r - 5, dots_y - r - 5), (dot_x + r + 5, dots_y + r + 5)], outline=accent2, width=2)
 
     elif section == 'conclusion':
-        # Spinning stars
-        for i, base_angle in enumerate([0, 120, 240]):
-            angle = base_angle + frame_num * 5
+        for i, base_angle in enumerate([20, 140, 260]):
+            angle = base_angle + frame_num * 4
             rad = math.radians(angle)
-            sx = 360 + int(200 * math.cos(rad))
-            sy = 100 + int(30 * math.sin(rad))
-            star_size = 1 + 0.3 * math.sin(frame_num * 0.3 + i)
-            draw.text((sx, sy - entry_offset_y), "★", font=f_title, fill=(255, 220, 50))
+            sx = W // 2 + int(220 * math.cos(rad))
+            sy = 90 + int(40 * math.sin(rad))
+            draw.text((sx, sy - slide), "✦", font=fonts['title'], fill=accent2)
 
         conclusion = text_data.get('conclusion', '')
-        wrapped = textwrap.fill(conclusion, width=24)
-        conc_y = 180 - entry_offset_y
+        wrapped = textwrap.fill(conclusion, width=21)
+        conc_y = 190 - slide
         lines = wrapped.split('\n')
-        box_h = len(lines) * 60 + 50
+        box_h = len(lines) * 64 + 60
 
-        scale = pop_scale
-        box_margin = int(30 + (1 - min(1, scale)) * 100)
+        margin = int(36 + (1 - pop_scale) * 120)
+        draw.rounded_rectangle([(margin, conc_y - 30), (W - margin, conc_y - 30 + box_h)], radius=30,
+                                fill=(*accent, 235))
 
-        overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
-        od = ImageDraw.Draw(overlay)
-        od.rounded_rectangle([(box_margin, conc_y - 25), (width - box_margin, conc_y + box_h)],
-                              radius=25, fill=(255, 50, 100, 220))
-        img2 = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
-        img.paste(img2)
-        draw = ImageDraw.Draw(img)
-
-        draw.text((box_margin + 24, conc_y + 4), wrapped, font=f_title, fill=(0, 0, 0))
-        draw.text((box_margin + 20, conc_y), wrapped, font=f_title, fill=(255, 255, 255))
+        for i, line in enumerate(lines):
+            draw.text((margin + 28, conc_y + i * 64), line, font=fonts['title'], fill=(255, 255, 255))
 
         hashtags = text_data.get('hashtags', '')
-        draw.text((50, conc_y + box_h + 30), hashtags[:42], font=f_small, fill=(180, 220, 255))
+        draw.text((44, conc_y + box_h + 24), hashtags[:42], font=fonts['small'], fill=(*accent2, 255))
 
-        # Pulsing CTA button
-        cta_pulse = 1 + 0.08 * math.sin(frame_num * 0.5)
-        cta_y = height - 150
-        cta_w = int(600 * cta_pulse)
-        cta_x = (width - cta_w) // 2
-        draw.rounded_rectangle([(cta_x, cta_y), (cta_x + cta_w, cta_y + 80)], radius=40, fill=(255, 220, 0))
-        draw.text((cta_x + 60, cta_y + 22), "🔥 ABONNE-TOI VITE ! 🔥", font=f_body, fill=(20, 20, 20))
+        pulse = 1 + 0.07 * math.sin(frame_num * 0.45)
+        cta_w = int(620 * pulse)
+        cta_x = (W - cta_w) // 2
+        cta_y = H - 150
+        draw.rounded_rectangle([(cta_x, cta_y), (cta_x + cta_w, cta_y + 84)], radius=42, fill=accent2)
+        draw.text((cta_x + 50, cta_y + 22), "🔥 ABONNE-TOI VITE ! 🔥", font=fonts['body'], fill=(10, 10, 15))
 
     return img.convert('RGB')
 
@@ -222,7 +284,9 @@ def generate_video_async(job_id, script, images_b64):
     jobs[job_id]['status'] = 'processing'
     try:
         fps = 24
-        # Faster sections for more dynamic pacing
+        palette = random.choice(PALETTE)
+        motion_seed = random.uniform(0, 6.28)
+
         sections_config = [
             ('titre', {'titre': script.get('titre', '')}, images_b64.get('image1'), 4.5),
             ('fait', {'fact': script.get('fait1', ''), 'num': '1'}, images_b64.get('image1'), 5.5),
@@ -231,7 +295,7 @@ def generate_video_async(job_id, script, images_b64):
             ('conclusion', {
                 'conclusion': script.get('conclusion', ''),
                 'hashtags': script.get('hashtags', '')
-            }, images_b64.get('image3'), 6),
+            }, images_b64.get('image3'), 6.5),
         ]
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -241,34 +305,35 @@ def generate_video_async(job_id, script, images_b64):
 
             for section_name, text_data, img_b64, duration in sections_config:
                 bg = None
-                if img_b64:
+                if img_b64 and len(img_b64) > 100:
                     try:
                         img_data = base64.b64decode(img_b64)
                         img_path = os.path.join(tmpdir, f'bg_{frame_count}.jpg')
                         with open(img_path, 'wb') as f:
                             f.write(img_data)
-                        bg = Image.open(img_path).convert('RGB').resize((720, 1280), Image.LANCZOS)
+                        bg = Image.open(img_path).convert('RGB')
                     except Exception as e:
                         print(f"Image load error: {e}")
+                        bg = None
 
                 total_section_frames = int(fps * duration)
                 for i in range(total_section_frames):
-                    frame = create_dynamic_frame(bg, text_data, i, total_section_frames, section_name)
-                    frame.save(os.path.join(frames_dir, f'frame_{frame_count:05d}.png'))
+                    frame = create_frame(bg, text_data, i, total_section_frames, section_name, palette, motion_seed)
+                    frame.save(os.path.join(frames_dir, f'frame_{frame_count:05d}.jpg'), quality=88)
                     frame_count += 1
 
             output_path = os.path.join(tmpdir, 'video.mp4')
             cmd = [
                 'ffmpeg', '-y',
                 '-framerate', str(fps),
-                '-i', os.path.join(frames_dir, 'frame_%05d.png'),
+                '-i', os.path.join(frames_dir, 'frame_%05d.jpg'),
                 '-c:v', 'libx264',
-                '-preset', 'ultrafast',
-                '-crf', '26',
+                '-preset', 'veryfast',
+                '-crf', '23',
                 '-pix_fmt', 'yuv420p',
                 output_path
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=280)
             if result.returncode != 0:
                 jobs[job_id]['status'] = 'error'
                 jobs[job_id]['error'] = result.stderr[-500:]
