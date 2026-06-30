@@ -229,8 +229,17 @@ def generate_voiceover(text, output_path):
                             'duration': chunk['duration'] / 10_000_000
                         })
 
-        asyncio.run(_generate())
+        # Use a fresh event loop bound to this thread (threading.Thread workers
+        # don't have a default event loop, which can break asyncio.run in some envs)
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(_generate())
+        finally:
+            loop.close()
+
         success = os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+        print(f"Edge TTS: success={success}, word_boundaries_count={len(word_boundaries)}")
         return success, word_boundaries
     except Exception as e:
         print(f"Edge TTS error: {e}")
@@ -269,27 +278,42 @@ def download_music(tmpdir):
     return None
 
 
-def build_caption_timeline(word_boundaries, words_per_group=3):
-    if not word_boundaries:
-        return [], []
+def build_caption_timeline(word_boundaries, full_text=None, voice_duration=None, words_per_group=3):
+    if word_boundaries:
+        groups_text = []
+        groups_timing = []
+        i = 0
+        n = len(word_boundaries)
+        while i < n:
+            size = words_per_group if (len(groups_text) % 3 != 2) else 2
+            chunk = word_boundaries[i:i + size]
+            if not chunk:
+                break
+            text = ' '.join(w['text'] for w in chunk)
+            start = chunk[0]['offset']
+            end = chunk[-1]['offset'] + chunk[-1]['duration']
+            groups_text.append(text)
+            groups_timing.append((start, end))
+            i += size
+        return groups_text, groups_timing
 
-    groups_text = []
-    groups_timing = []
-    i = 0
-    n = len(word_boundaries)
-    while i < n:
-        size = words_per_group if (len(groups_text) % 3 != 2) else 2
-        chunk = word_boundaries[i:i + size]
-        if not chunk:
-            break
-        text = ' '.join(w['text'] for w in chunk)
-        start = chunk[0]['offset']
-        end = chunk[-1]['offset'] + chunk[-1]['duration']
-        groups_text.append(text)
-        groups_timing.append((start, end))
-        i += size
+    # Fallback: no word-level timing available from TTS, distribute evenly across voice_duration
+    if full_text and voice_duration and voice_duration > 1:
+        words = full_text.split()
+        if not words:
+            return [], []
+        groups_text = []
+        i = 0
+        while i < len(words):
+            size = words_per_group if (len(groups_text) % 3 != 2) else 2
+            groups_text.append(' '.join(words[i:i + size]))
+            i += size
+        n_groups = len(groups_text)
+        slot = voice_duration / n_groups
+        groups_timing = [(idx * slot, (idx + 1) * slot) for idx in range(n_groups)]
+        return groups_text, groups_timing
 
-    return groups_text, groups_timing
+    return [], []
 
 
 def generate_video_async(job_id, script, images_b64):
@@ -308,7 +332,10 @@ def generate_video_async(job_id, script, images_b64):
             has_voice, word_boundaries = generate_voiceover(voix_off_text, voice_path)
             voice_duration = get_audio_duration(voice_path) if has_voice else None
 
-            caption_groups, caption_timings = build_caption_timeline(word_boundaries, words_per_group=3)
+            caption_groups, caption_timings = build_caption_timeline(
+                word_boundaries, full_text=voix_off_text, voice_duration=voice_duration, words_per_group=3
+            )
+            print(f"Caption groups built: {len(caption_groups)}")
 
             if voice_duration and voice_duration > 3:
                 total_duration = voice_duration + 1.5
