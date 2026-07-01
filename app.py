@@ -511,7 +511,7 @@ def generate_video_async(job_id, script, images_b64):
                 jobs[job_id]['error'] = result.stderr[-500:]
                 return
 
-            # Generate SFX track and compute transition timestamps
+            # Generate SFX track
             transition_times = [section_duration * i for i in range(1, n_micro_sections)]
             sfx_track = generate_sfx_track(tmpdir, transition_times, total_duration)
 
@@ -521,53 +521,77 @@ def generate_video_async(job_id, script, images_b64):
             fade_start = max(0.1, total_duration - 1.2)
             dur_str = f"{total_duration:.2f}"
 
-            # Best case: voice + music + SFX (3 clean inputs)
-            if has_voice and music_path and sfx_track:
-                flt = (
-                    f"[2:a]volume=0.12,aloop=loop=-1:size=2e+09[m];"
-                    f"[3:a]volume=0.5[sfx];"
-                    f"[1:a][m]amix=inputs=2:duration=first:dropout_transition=2[vm];"
-                    f"[vm][sfx]amix=inputs=2:duration=first:normalize=0[premix];"
-                    f"[premix]afade=t=out:st={fade_start:.2f}:d=1.2[aout]"
-                )
-                mix_cmd = [
-                    'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
+            # Step 1: Mix voice + music (proven working formula from earlier versions)
+            voice_music_path = os.path.join(tmpdir, 'voice_music.mp4')
+            if has_voice and music_path:
+                step1_cmd = [
+                    'ffmpeg', '-y',
+                    '-i', silent_video_path,
+                    '-i', voice_path,
                     '-stream_loop', '-1', '-i', music_path,
+                    '-filter_complex',
+                    '[2:a]volume=0.12[music];[1:a]volume=1.0[voice];[voice][music]amix=inputs=2:duration=first:dropout_transition=2[aout]',
+                    '-map', '0:v', '-map', '[aout]',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+                    '-shortest', voice_music_path
+                ]
+                r1 = subprocess.run(step1_cmd, capture_output=True, text=True, timeout=120)
+                if r1.returncode == 0 and os.path.exists(voice_music_path) and os.path.getsize(voice_music_path) > 1000:
+                    print("Step 1 OK: voice + music mixed")
+                    base_video = voice_music_path
+                else:
+                    print(f"Step 1 FAILED (voice+music): {r1.stderr[-300:]}")
+                    base_video = None
+            else:
+                base_video = None
+
+            # Step 2: Add SFX on top (if step 1 worked and SFX track exists)
+            if base_video and sfx_track:
+                sfx_output = os.path.join(tmpdir, 'with_sfx.mp4')
+                step2_cmd = [
+                    'ffmpeg', '-y',
+                    '-i', base_video,
                     '-i', sfx_track,
-                    '-filter_complex', flt, '-map', '0:v', '-map', '[aout]',
-                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', dur_str, output_path
+                    '-filter_complex',
+                    f'[1:a]volume=0.5[sfx];[0:a][sfx]amix=inputs=2:duration=first:normalize=0,afade=t=out:st={fade_start:.2f}:d=1.2[aout]',
+                    '-map', '0:v', '-map', '[aout]',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+                    '-t', dur_str, sfx_output
                 ]
-                mix_result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=180)
-                mixed_ok = mix_result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
-                if not mixed_ok:
-                    print(f"Voice+music+SFX mix failed: {mix_result.stderr[-300:]}")
+                r2 = subprocess.run(step2_cmd, capture_output=True, text=True, timeout=120)
+                if r2.returncode == 0 and os.path.exists(sfx_output) and os.path.getsize(sfx_output) > 1000:
+                    print("Step 2 OK: SFX added")
+                    output_path = sfx_output
+                    mixed_ok = True
+                else:
+                    print(f"Step 2 FAILED (SFX overlay): {r2.stderr[-200:]}")
 
-            # Fallback: voice + music without SFX
-            if not mixed_ok and has_voice and music_path:
-                flt = (
-                    f"[2:a]volume=0.12[m];[1:a]volume=1.0[v];"
-                    f"[v][m]amix=inputs=2:duration=longest:dropout_transition=2[mix];"
-                    f"[mix]afade=t=out:st={fade_start:.2f}:d=1.2[aout]"
-                )
-                mix_cmd = [
-                    'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
-                    '-stream_loop', '-1', '-i', music_path,
-                    '-filter_complex', flt, '-map', '0:v', '-map', '[aout]',
-                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', dur_str, output_path
+            # If SFX failed but voice+music worked, add fade and use that
+            if not mixed_ok and base_video:
+                fade_output = os.path.join(tmpdir, 'faded.mp4')
+                fade_cmd = [
+                    'ffmpeg', '-y', '-i', base_video,
+                    '-af', f'afade=t=out:st={fade_start:.2f}:d=1.2',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+                    '-t', dur_str, fade_output
                 ]
-                mix_result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=120)
-                mixed_ok = mix_result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
-                if not mixed_ok:
-                    print(f"Voice+music mix failed: {mix_result.stderr[-300:]}")
+                r3 = subprocess.run(fade_cmd, capture_output=True, text=True, timeout=60)
+                if r3.returncode == 0 and os.path.exists(fade_output) and os.path.getsize(fade_output) > 1000:
+                    output_path = fade_output
+                    mixed_ok = True
+                else:
+                    output_path = base_video
+                    mixed_ok = True
 
-            # Fallback: voice only
+            # Last fallback: voice only (no music at all)
             if not mixed_ok and has_voice:
-                flt2 = f"[1:a]afade=t=out:st={fade_start:.2f}:d=1.2[aout]"
-                subprocess.run([
+                simple_cmd = [
                     'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
-                    '-filter_complex', flt2, '-map', '0:v', '-map', '[aout]',
-                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', dur_str, output_path
-                ], capture_output=True, text=True, timeout=120)
+                    '-map', '0:v', '-map', '1:a',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+                    '-shortest', output_path
+                ]
+                subprocess.run(simple_cmd, capture_output=True, text=True, timeout=120)
                 mixed_ok = os.path.exists(output_path) and os.path.getsize(output_path) > 1000
 
             if not mixed_ok:
