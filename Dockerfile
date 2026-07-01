@@ -3,7 +3,12 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     fonts-dejavu-core \
-    && rm -rf /var/lib/apt/lists/*
+    wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /usr/share/fonts/truetype/montserrat \
+    && wget -q -O /usr/share/fonts/truetype/montserrat/Montserrat-Bold.ttf "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-Bold.ttf" \
+    && wget -q -O /usr/share/fonts/truetype/montserrat/Montserrat-ExtraBold.ttf "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-ExtraBold.ttf" \
+    && fc-cache -f
 
 WORKDIR /app
 
