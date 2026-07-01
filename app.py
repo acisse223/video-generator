@@ -13,28 +13,49 @@ import math
 import random
 import asyncio
 import edge_tts
+import re
 
 app = Flask(__name__)
 jobs = {}
 
 W, H = 720, 1280
 
-# ===== BRANDING =====
 SIGNATURE = "Tiens-toi bien, ça va te choquer !"
 CTA_TEXT = "Abonne-toi pour plus de faits fous !"
 
 PALETTE = [
-    {"accent": (255, 56, 100), "accent2": (255, 220, 0), "name": "fire"},
-    {"accent": (0, 200, 255), "accent2": (0, 255, 170), "name": "cyber"},
-    {"accent": (255, 90, 50), "accent2": (255, 225, 0), "name": "sunset"},
-    {"accent": (140, 90, 255), "accent2": (0, 245, 255), "name": "purple"},
+    {"accent": (255, 56, 100), "accent2": (255, 220, 0)},
+    {"accent": (0, 200, 255), "accent2": (0, 255, 170)},
+    {"accent": (255, 90, 50), "accent2": (255, 225, 0)},
+    {"accent": (140, 90, 255), "accent2": (0, 245, 255)},
 ]
 
 MUSIC_TRACKS = [
     "https://cdn.pixabay.com/audio/2024/03/05/audio_d0c6ff1bab.mp3",
     "https://cdn.pixabay.com/audio/2023/11/24/audio_7b3f4b1e2c.mp3",
     "https://cdn.pixabay.com/audio/2022/10/25/audio_946bc4f4a4.mp3",
+    "https://cdn.pixabay.com/audio/2024/01/16/audio_5a36b4570e.mp3",
+    "https://cdn.pixabay.com/audio/2023/08/10/audio_94e657e549.mp3",
+    "https://cdn.pixabay.com/audio/2023/10/30/audio_f4e185ae9b.mp3",
+    "https://cdn.pixabay.com/audio/2024/02/14/audio_8e53359d0e.mp3",
+    "https://cdn.pixabay.com/audio/2023/05/16/audio_482aba52e8.mp3",
+    "https://cdn.pixabay.com/audio/2024/04/23/audio_e16e58d533.mp3",
+    "https://cdn.pixabay.com/audio/2023/09/04/audio_8e942a6d73.mp3",
 ]
+
+ALL_VOICES = [
+    "fr-FR-RemyMultilingualNeural",
+    "fr-FR-VivienneMultilingualNeural",
+    "fr-FR-LucienMultilingualNeural",
+    "fr-FR-HenriNeural",
+    "fr-FR-DeniseNeural",
+    "fr-BE-CharlineNeural",
+    "fr-CA-AntoineNeural",
+    "fr-CA-SylvieNeural",
+    "fr-CH-FabriceNeural",
+]
+
+CROSSFADE_FRAMES = 6  # frames de fondu entre chaque section
 
 
 def ease_out_back(t):
@@ -44,12 +65,23 @@ def ease_out_back(t):
 
 
 def load_fonts():
-    base = "/usr/share/fonts/truetype/dejavu/"
-    return {
-        'caption': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 58),
-        'outro': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 60),
-        'small': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 30),
-    }
+    mont = "/usr/share/fonts/truetype/montserrat/"
+    deja = "/usr/share/fonts/truetype/dejavu/"
+    # Prefer Montserrat (modern), fallback to DejaVu
+    try:
+        return {
+            'caption': ImageFont.truetype(mont + "Montserrat-ExtraBold.ttf", 58),
+            'caption_big': ImageFont.truetype(mont + "Montserrat-ExtraBold.ttf", 68),
+            'outro': ImageFont.truetype(mont + "Montserrat-ExtraBold.ttf", 60),
+            'small': ImageFont.truetype(mont + "Montserrat-Bold.ttf", 30),
+        }
+    except Exception:
+        return {
+            'caption': ImageFont.truetype(deja + "DejaVuSans-Bold.ttf", 58),
+            'caption_big': ImageFont.truetype(deja + "DejaVuSans-Bold.ttf", 68),
+            'outro': ImageFont.truetype(deja + "DejaVuSans-Bold.ttf", 60),
+            'small': ImageFont.truetype(deja + "DejaVuSans-Bold.ttf", 30),
+        }
 
 
 def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
@@ -57,10 +89,7 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
         img = Image.new('RGB', (W, H), (12, 8, 28))
         d = ImageDraw.Draw(img)
         for y in range(H):
-            r = int(12 + 28 * (y / H))
-            g = int(8 + 12 * (y / H))
-            b = int(38 + 40 * (y / H))
-            d.line([(0, y), (W, y)], fill=(r, g, b))
+            d.line([(0, y), (W, y)], fill=(12 + int(28*(y/H)), 8 + int(12*(y/H)), 38 + int(40*(y/H))))
         return img
 
     t = frame_num / max(total_frames - 1, 1)
@@ -70,10 +99,8 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
 
     pan_x = math.sin(motion_seed) * 45
     pan_y = math.cos(motion_seed) * 35
-    left = int((new_w - W) / 2 + pan_x * t)
-    top = int((new_h - H) / 2 + pan_y * t)
-    left = max(0, min(left, new_w - W))
-    top = max(0, min(top, new_h - H))
+    left = max(0, min(int((new_w - W) / 2 + pan_x * t), new_w - W))
+    top = max(0, min(int((new_h - H) / 2 + pan_y * t), new_h - H))
     img = img.crop((left, top, left + W, top + H))
 
     img = ImageEnhance.Color(img).enhance(1.3)
@@ -85,11 +112,9 @@ def prep_background(bg_image, frame_num, total_frames, motion_seed=0):
 def caption_readability_band(img):
     overlay = Image.new('RGBA', (W, H), (0, 0, 0, 0))
     gd = ImageDraw.Draw(overlay)
-    band_top = int(H * 0.30)
-    band_bot = int(H * 0.84)
-    for y in range(band_top, band_bot):
-        rel = (y - band_top) / (band_bot - band_top)
-        alpha = int(125 * math.sin(rel * math.pi))
+    bt, bb = int(H * 0.30), int(H * 0.84)
+    for y in range(bt, bb):
+        alpha = int(125 * math.sin((y - bt) / (bb - bt) * math.pi))
         gd.line([(0, y), (W, y)], fill=(0, 0, 0, alpha))
     return Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
 
@@ -118,8 +143,7 @@ def words_with_timing(word_boundaries, full_text, voice_duration):
 
 
 def group_words(words, words_per_group=3):
-    groups = []
-    i = 0
+    groups, i = [], 0
     while i < len(words):
         size = words_per_group if (len(groups) % 3 != 2) else 2
         chunk = words[i:i + size]
@@ -131,24 +155,34 @@ def group_words(words, words_per_group=3):
 
 
 def draw_karaoke_caption(draw, fonts, group, t_sec, frame_in_group, base_y, highlight_color):
+    """Karaoke captions with ZOOM on active word."""
     font = fonts['caption']
+    font_big = fonts['caption_big']
     line_height = 70
-    max_width = W - 120
+    max_width = W - 100
     space_w = draw.textlength(' ', font=font)
 
-    lines = []
-    cur = []
-    cur_w = 0.0
+    # Measure all words with normal font
+    word_data = []
     for w in group:
         wt = w['text'].upper()
-        ww = draw.textlength(wt, font=font)
+        active = (w['start'] <= t_sec < w['end'])
+        f = font_big if active else font
+        ww = draw.textlength(wt, font=f)
+        word_data.append((w, wt, ww, f, active))
+
+    # Greedy line-wrap
+    lines = []
+    cur, cur_w = [], 0.0
+    for wd in word_data:
+        w, wt, ww, f, active = wd
         add = ww if not cur else ww + space_w
         if cur and cur_w + add > max_width:
             lines.append((cur, cur_w))
-            cur = [(w, ww, wt)]
+            cur = [wd]
             cur_w = ww
         else:
-            cur.append((w, ww, wt))
+            cur.append(wd)
             cur_w += add
     if cur:
         lines.append((cur, cur_w))
@@ -162,22 +196,21 @@ def draw_karaoke_caption(draw, fonts, group, t_sec, frame_in_group, base_y, high
 
     for line_words, line_w in lines:
         x = (W - line_w) // 2
-        for (w, ww, wt) in line_words:
-            active = (w['start'] <= t_sec < w['end'])
+        for (w, wt, ww, f, active) in line_words:
             color = highlight_color if active else (255, 255, 255)
-            draw_outlined_text(draw, int(x), int(y), wt, font, color, outline_w=6)
+            y_offset = -4 if active else 0  # active word shifts up slightly (zoom feel)
+            draw_outlined_text(draw, int(x), int(y + y_offset), wt, f, color, outline_w=6)
             x += ww + space_w
         y += line_height
 
 
 def draw_outro_card(draw, fonts, t_elapsed, palette):
-    accent = palette['accent']
-    accent2 = palette['accent2']
+    accent, accent2 = palette['accent'], palette['accent2']
     pop = ease_out_back(min(1.0, t_elapsed / 0.4))
     bounce = int((1 - pop) * 50)
 
-    of = fonts['outro']
     main = "ABONNE-TOI"
+    of = fonts['outro']
     bb = draw.textbbox((0, 0), main, font=of)
     lw = bb[2] - bb[0]
     cy = int(H * 0.44) - bounce
@@ -193,8 +226,8 @@ def draw_outro_card(draw, fonts, t_elapsed, palette):
     draw_outlined_text(draw, (W - sw) // 2, cy + 118, sub, sf, accent2, outline_w=5)
 
 
-def draw_progress_bar(draw, global_frame_num, global_total_frames, accent2):
-    prog = global_frame_num / max(global_total_frames - 1, 1)
+def draw_progress_bar(draw, gfn, gtf, accent2):
+    prog = gfn / max(gtf - 1, 1)
     draw.rectangle([0, 0, W, 8], fill=(255, 255, 255, 45))
     draw.rectangle([0, 0, int(W * prog), 8], fill=(*accent2, 255))
 
@@ -218,7 +251,6 @@ def create_frame(bg_image, frame_num, total_frames, palette, motion_seed,
     t = global_frame_num / fps
 
     if t < outro_start:
-        # Karaoke: signature + narration (subject carried by the punchy hook, no static title card)
         if caption_groups:
             for g in caption_groups:
                 if g[0]['start'] <= t < g[-1]['end']:
@@ -226,35 +258,74 @@ def create_frame(bg_image, frame_num, total_frames, palette, motion_seed,
                     draw_karaoke_caption(draw, fonts, g, t, frame_in, int(H * 0.56), accent2)
                     break
     else:
-        # Clear spoken outro
         draw_outro_card(draw, fonts, t - outro_start, palette)
 
     draw_progress_bar(draw, global_frame_num, global_total_frames, accent2)
     return img.convert('RGB')
 
 
+def crossfade_frames(frame_a, frame_b, alpha):
+    """Blend two PIL images. alpha=0 => pure A, alpha=1 => pure B."""
+    return Image.blend(frame_a, frame_b, alpha)
+
+
+def add_ssml_breaks(text):
+    """Insert short SSML pauses after sentences for more natural rhythm."""
+    text = re.sub(r'\.(\s)', r'. <break time="350ms"/>\1', text)
+    text = re.sub(r'\?(\s)', r'? <break time="400ms"/>\1', text)
+    text = re.sub(r'!(\s)', r'! <break time="300ms"/>\1', text)
+    return f"<speak>{text}</speak>"
+
+
+def generate_sfx(tmpdir):
+    """Generate simple transition sound effects using FFmpeg's built-in synthesizer."""
+    sfx_paths = []
+    # Whoosh (pink noise, bandpass, short)
+    whoosh = os.path.join(tmpdir, 'sfx_whoosh.wav')
+    subprocess.run([
+        'ffmpeg', '-y', '-f', 'lavfi', '-i',
+        'anoisesrc=d=0.25:c=pink:r=44100,highpass=f=2000,afade=t=in:st=0:d=0.08,afade=t=out:st=0.12:d=0.13',
+        '-ar', '44100', whoosh
+    ], capture_output=True, timeout=10)
+    if os.path.exists(whoosh):
+        sfx_paths.append(whoosh)
+
+    # Impact (low sine burst)
+    impact = os.path.join(tmpdir, 'sfx_impact.wav')
+    subprocess.run([
+        'ffmpeg', '-y', '-f', 'lavfi', '-i',
+        'sine=frequency=65:duration=0.18,afade=t=out:st=0:d=0.18',
+        '-ar', '44100', impact
+    ], capture_output=True, timeout=10)
+    if os.path.exists(impact):
+        sfx_paths.append(impact)
+
+    # Ding (high sine ping)
+    ding = os.path.join(tmpdir, 'sfx_ding.wav')
+    subprocess.run([
+        'ffmpeg', '-y', '-f', 'lavfi', '-i',
+        'sine=frequency=1200:duration=0.12,afade=t=out:st=0.02:d=0.10',
+        '-ar', '44100', ding
+    ], capture_output=True, timeout=10)
+    if os.path.exists(ding):
+        sfx_paths.append(ding)
+
+    return sfx_paths
+
+
 def generate_voiceover(text, output_path):
-    """Expressive French voiceover via Edge TTS multilingual voices. Returns (success, word_timings)."""
-    all_voices = [
-        "fr-FR-RemyMultilingualNeural",
-        "fr-FR-VivienneMultilingualNeural",
-        "fr-FR-LucienMultilingualNeural",
-        "fr-FR-HenriNeural",
-        "fr-FR-DeniseNeural",
-        "fr-BE-CharlineNeural",
-        "fr-CA-AntoineNeural",
-        "fr-CA-SylvieNeural",
-        "fr-CH-FabriceNeural",
-    ]
-    primary = random.choice(all_voices)
+    """Expressive French voiceover with SSML pauses for natural rhythm."""
+    primary = random.choice(ALL_VOICES)
     voice_order = [primary, "fr-FR-RemyMultilingualNeural", "fr-FR-HenriNeural"]
+
+    ssml_text = add_ssml_breaks(text)
 
     for voice in voice_order:
         try:
             word_boundaries = []
 
             async def _generate():
-                communicate = edge_tts.Communicate(text, voice, rate="+18%", pitch="+8Hz")
+                communicate = edge_tts.Communicate(ssml_text, voice, rate="+18%", pitch="+8Hz")
                 with open(output_path, 'wb') as f:
                     async for chunk in communicate.stream():
                         if chunk["type"] == "audio":
@@ -278,6 +349,9 @@ def generate_voiceover(text, output_path):
                 return True, word_boundaries
         except Exception as e:
             print(f"Edge TTS failed for {voice}: {e}")
+            # If SSML fails, retry without SSML
+            if '<speak>' in ssml_text:
+                ssml_text = text
             continue
 
     try:
@@ -327,14 +401,13 @@ def generate_video_async(job_id, script, images_b64):
                 f"{script.get('titre', '')}. {script.get('fait1', '')} {script.get('fait2', '')} "
                 f"{script.get('fait3', '')} {script.get('conclusion', '')}"
             )
-            # Main segment = signature + narration (karaoke) ; CTA is a separate spoken segment
-            main_text = f"{SIGNATURE} {narration}"
+            full_text = f"{SIGNATURE} {narration}"
 
             main_path = os.path.join(tmpdir, 'main.mp3')
             cta_path = os.path.join(tmpdir, 'cta.mp3')
             voice_path = os.path.join(tmpdir, 'voice.mp3')
 
-            ok_main, wb_main = generate_voiceover(main_text, main_path)
+            ok_main, wb_main = generate_voiceover(full_text, main_path)
             dm = get_audio_duration(main_path) if ok_main else None
 
             ok_cta, _ = generate_voiceover(CTA_TEXT, cta_path)
@@ -342,7 +415,6 @@ def generate_video_async(job_id, script, images_b64):
 
             has_voice = False
             if ok_main and ok_cta and dc:
-                # Concatenate main + CTA so the "abonne-toi" is actually spoken at the end
                 concat_cmd = [
                     'ffmpeg', '-y', '-i', main_path, '-i', cta_path,
                     '-filter_complex', '[0:a][1:a]concat=n=2:v=0:a=1[a]',
@@ -361,14 +433,20 @@ def generate_video_async(job_id, script, images_b64):
                 has_voice = True
 
             if has_voice and dm and dm > 3:
-                words = words_with_timing(wb_main, main_text, dm)
-                caption_groups = group_words(words, words_per_group=3)
+                words = words_with_timing(wb_main, full_text, dm)
+                n_sig = len(SIGNATURE.split())
+                narration_words = words[n_sig:] if len(words) > n_sig else words
+                caption_groups = group_words(narration_words, words_per_group=3)
                 outro_start = dm
                 total_duration = dm + (dc or 1.6) + TAIL
             else:
                 caption_groups = []
-                outro_start = 18.0
-                total_duration = 22.0
+                outro_start = 55.0
+                total_duration = 62.0
+
+            # Ensure minimum 61s for monetization
+            if total_duration < 61:
+                total_duration = 62.0
 
             n_micro_sections = 12
             section_duration = total_duration / n_micro_sections
@@ -394,20 +472,43 @@ def generate_video_async(job_id, script, images_b64):
 
             micro_to_img = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
 
-            for frame_num in range(total_frames):
-                t_sec = frame_num / fps
-                section_idx = min(int(t_sec / section_duration), n_micro_sections - 1)
+            # Generate raw frames per section, then crossfade between sections
+            section_frames = {}  # section_idx -> list of PIL images
+            for section_idx in range(n_micro_sections):
+                sec_start = int(section_idx * section_duration * fps)
+                sec_end = int((section_idx + 1) * section_duration * fps)
+                if section_idx == n_micro_sections - 1:
+                    sec_end = total_frames
                 bg = bgs[micro_to_img[section_idx]]
-                local_frame_num = frame_num - int(section_idx * section_duration * fps)
                 local_motion_seed = motion_seed + section_idx * 1.7
+                sec_len = sec_end - sec_start
 
-                frame = create_frame(
-                    bg, local_frame_num, int(section_duration * fps),
-                    palette, local_motion_seed,
-                    caption_groups=caption_groups, outro_start=outro_start,
-                    global_frame_num=frame_num, global_total_frames=total_frames, fps=fps
-                )
-                frame.save(os.path.join(frames_dir, f'frame_{frame_num:05d}.jpg'), quality=88)
+                for i in range(sec_len):
+                    gfn = sec_start + i
+                    frame = create_frame(
+                        bg, i, sec_len, palette, local_motion_seed,
+                        caption_groups=caption_groups, outro_start=outro_start,
+                        global_frame_num=gfn, global_total_frames=total_frames, fps=fps
+                    )
+                    section_frames[gfn] = frame
+
+            # Apply crossfade between adjacent sections
+            for section_idx in range(1, n_micro_sections):
+                boundary = int(section_idx * section_duration * fps)
+                for offset in range(CROSSFADE_FRAMES):
+                    fa_idx = boundary - CROSSFADE_FRAMES + offset
+                    fb_idx = boundary + offset
+                    if fa_idx in section_frames and fb_idx in section_frames:
+                        alpha = offset / CROSSFADE_FRAMES
+                        blended = crossfade_frames(section_frames[fa_idx], section_frames[fb_idx], alpha * 0.5)
+                        section_frames[fa_idx] = blended
+
+            # Save all frames
+            for gfn in range(total_frames):
+                if gfn in section_frames:
+                    section_frames[gfn].save(
+                        os.path.join(frames_dir, f'frame_{gfn:05d}.jpg'), quality=88
+                    )
 
             silent_video_path = os.path.join(tmpdir, 'silent_video.mp4')
             cmd = [
@@ -416,23 +517,61 @@ def generate_video_async(job_id, script, images_b64):
                 '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
                 '-pix_fmt', 'yuv420p', silent_video_path
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=280)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
             if result.returncode != 0:
                 jobs[job_id]['status'] = 'error'
                 jobs[job_id]['error'] = result.stderr[-500:]
                 return
 
+            # Generate SFX and compute transition timestamps
+            sfx_paths = generate_sfx(tmpdir)
+            transition_times = [section_duration * i for i in range(1, n_micro_sections)]
+
             output_path = os.path.join(tmpdir, 'final.mp4')
             music_path = download_music(tmpdir)
             mixed_ok = False
-            fade_start = max(0.1, total_duration - 1.0)
+            fade_start = max(0.1, total_duration - 1.2)
             dur_str = f"{total_duration:.2f}"
 
-            if has_voice and music_path:
+            if has_voice and music_path and sfx_paths:
+                # Build SFX overlay: place a random SFX at each transition point
+                sfx_filter_inputs = ""
+                sfx_filter_parts = []
+                sfx_input_args = []
+                for ti, tt in enumerate(transition_times[:8]):  # cap at 8 SFX to avoid filter complexity
+                    sfx_file = random.choice(sfx_paths)
+                    input_idx = 3 + ti
+                    sfx_input_args.extend(['-i', sfx_file])
+                    sfx_filter_parts.append(f"[{input_idx}:a]adelay={int(tt*1000)}|{int(tt*1000)},volume=0.5[sfx{ti}]")
+
+                sfx_mix_inputs = ''.join(f'[sfx{i}]' for i in range(len(sfx_filter_parts)))
+                if sfx_filter_parts:
+                    sfx_merge = f"{sfx_mix_inputs}amix=inputs={len(sfx_filter_parts)}:normalize=0[sfxmix]"
+                    flt = (
+                        f"[2:a]volume=0.10[m];[1:a]volume=1.0[v];"
+                        f"{';'.join(sfx_filter_parts)};{sfx_merge};"
+                        f"[v][m]amix=inputs=2:duration=longest:dropout_transition=2[vm];"
+                        f"[vm][sfxmix]amix=inputs=2:duration=first:normalize=0[premix];"
+                        f"[premix]afade=t=out:st={fade_start:.2f}:d=1.2[aout]"
+                    )
+                    mix_cmd = [
+                        'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
+                        '-stream_loop', '-1', '-i', music_path,
+                    ] + sfx_input_args + [
+                        '-filter_complex', flt, '-map', '0:v', '-map', '[aout]',
+                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', dur_str, output_path
+                    ]
+                    mix_result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=180)
+                    mixed_ok = mix_result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+                    if not mixed_ok:
+                        print(f"SFX mix failed: {mix_result.stderr[-300:]}")
+
+            # Fallback: voice + music without SFX
+            if not mixed_ok and has_voice and music_path:
                 flt = (
                     f"[2:a]volume=0.10[m];[1:a]volume=1.0[v];"
                     f"[v][m]amix=inputs=2:duration=longest:dropout_transition=2[mix];"
-                    f"[mix]afade=t=out:st={fade_start:.2f}:d=1.0[aout]"
+                    f"[mix]afade=t=out:st={fade_start:.2f}:d=1.2[aout]"
                 )
                 mix_cmd = [
                     'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
@@ -443,14 +582,14 @@ def generate_video_async(job_id, script, images_b64):
                 mix_result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=120)
                 mixed_ok = mix_result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
 
+            # Fallback: voice only
             if not mixed_ok and has_voice:
-                flt2 = f"[1:a]afade=t=out:st={fade_start:.2f}:d=1.0[aout]"
-                simple_cmd = [
+                flt2 = f"[1:a]afade=t=out:st={fade_start:.2f}:d=1.2[aout]"
+                subprocess.run([
                     'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
                     '-filter_complex', flt2, '-map', '0:v', '-map', '[aout]',
                     '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', dur_str, output_path
-                ]
-                subprocess.run(simple_cmd, capture_output=True, text=True, timeout=120)
+                ], capture_output=True, text=True, timeout=120)
                 mixed_ok = os.path.exists(output_path) and os.path.getsize(output_path) > 1000
 
             if not mixed_ok:
