@@ -359,7 +359,7 @@ def generate_video_async(job_id, script, images_b64):
                 outro_start = 18.0
                 total_duration = 22.0
 
-            n_micro_sections = 6
+            n_micro_sections = 8
             section_duration = total_duration / n_micro_sections
             total_frames = int(total_duration * fps)
 
@@ -367,7 +367,7 @@ def generate_video_async(job_id, script, images_b64):
             os.makedirs(frames_dir)
 
             bgs = []
-            for key in ['image1', 'image2', 'image3']:
+            for key in ['image1', 'image2', 'image3', 'image4']:
                 b64v = images_b64.get(key)
                 bg = None
                 if b64v and len(b64v) > 100:
@@ -381,7 +381,7 @@ def generate_video_async(job_id, script, images_b64):
                         print(f"Image load error for {key}: {e}")
                 bgs.append(bg)
 
-            micro_to_img = [0, 1, 2, 0, 1, 2]
+            micro_to_img = [0, 1, 2, 3, 0, 1, 2, 3]
 
             for frame_num in range(total_frames):
                 t_sec = frame_num / fps
