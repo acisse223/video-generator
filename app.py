@@ -472,8 +472,10 @@ def generate_video_async(job_id, script, images_b64):
 
             micro_to_img = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
 
-            # Generate raw frames per section, then crossfade between sections
-            section_frames = {}  # section_idx -> list of PIL images
+            # Generate and save frames streaming (memory-efficient)
+            # For crossfade: keep only the last frame of previous section
+            prev_section_last_frame = None
+
             for section_idx in range(n_micro_sections):
                 sec_start = int(section_idx * section_duration * fps)
                 sec_end = int((section_idx + 1) * section_duration * fps)
@@ -490,25 +492,18 @@ def generate_video_async(job_id, script, images_b64):
                         caption_groups=caption_groups, outro_start=outro_start,
                         global_frame_num=gfn, global_total_frames=total_frames, fps=fps
                     )
-                    section_frames[gfn] = frame
 
-            # Apply crossfade between adjacent sections
-            for section_idx in range(1, n_micro_sections):
-                boundary = int(section_idx * section_duration * fps)
-                for offset in range(CROSSFADE_FRAMES):
-                    fa_idx = boundary - CROSSFADE_FRAMES + offset
-                    fb_idx = boundary + offset
-                    if fa_idx in section_frames and fb_idx in section_frames:
-                        alpha = offset / CROSSFADE_FRAMES
-                        blended = crossfade_frames(section_frames[fa_idx], section_frames[fb_idx], alpha * 0.5)
-                        section_frames[fa_idx] = blended
+                    # Crossfade: blend first few frames of this section with last frame of previous
+                    if prev_section_last_frame is not None and i < CROSSFADE_FRAMES:
+                        alpha = i / CROSSFADE_FRAMES
+                        frame = Image.blend(prev_section_last_frame, frame, alpha)
 
-            # Save all frames
-            for gfn in range(total_frames):
-                if gfn in section_frames:
-                    section_frames[gfn].save(
-                        os.path.join(frames_dir, f'frame_{gfn:05d}.jpg'), quality=88
-                    )
+                    # Remember last frame of this section for next crossfade
+                    if i == sec_len - 1:
+                        prev_section_last_frame = frame.copy()
+
+                    frame.save(os.path.join(frames_dir, f'frame_{gfn:05d}.jpg'), quality=88)
+                    frame = None  # free memory immediately
 
             silent_video_path = os.path.join(tmpdir, 'silent_video.mp4')
             cmd = [
