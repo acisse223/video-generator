@@ -34,13 +34,6 @@ MUSIC_TRACKS = [
     "https://cdn.pixabay.com/audio/2024/03/05/audio_d0c6ff1bab.mp3",
     "https://cdn.pixabay.com/audio/2023/11/24/audio_7b3f4b1e2c.mp3",
     "https://cdn.pixabay.com/audio/2022/10/25/audio_946bc4f4a4.mp3",
-    "https://cdn.pixabay.com/audio/2024/01/16/audio_5a36b4570e.mp3",
-    "https://cdn.pixabay.com/audio/2023/08/10/audio_94e657e549.mp3",
-    "https://cdn.pixabay.com/audio/2023/10/30/audio_f4e185ae9b.mp3",
-    "https://cdn.pixabay.com/audio/2024/02/14/audio_8e53359d0e.mp3",
-    "https://cdn.pixabay.com/audio/2023/05/16/audio_482aba52e8.mp3",
-    "https://cdn.pixabay.com/audio/2024/04/23/audio_e16e58d533.mp3",
-    "https://cdn.pixabay.com/audio/2023/09/04/audio_8e942a6d73.mp3",
 ]
 
 ALL_VOICES = [
@@ -277,40 +270,40 @@ def add_ssml_breaks(text):
     return f"<speak>{text}</speak>"
 
 
-def generate_sfx(tmpdir):
-    """Generate simple transition sound effects using FFmpeg's built-in synthesizer."""
-    sfx_paths = []
-    # Whoosh (pink noise, bandpass, short)
+def generate_sfx_track(tmpdir, transition_times, total_duration):
+    """Generate a single audio track with whoosh sounds placed at each transition timestamp."""
+    # Generate one whoosh sound
     whoosh = os.path.join(tmpdir, 'sfx_whoosh.wav')
     subprocess.run([
         'ffmpeg', '-y', '-f', 'lavfi', '-i',
         'anoisesrc=d=0.25:c=pink:r=44100,highpass=f=2000,afade=t=in:st=0:d=0.08,afade=t=out:st=0.12:d=0.13',
         '-ar', '44100', whoosh
     ], capture_output=True, timeout=10)
-    if os.path.exists(whoosh):
-        sfx_paths.append(whoosh)
 
-    # Impact (low sine burst)
-    impact = os.path.join(tmpdir, 'sfx_impact.wav')
-    subprocess.run([
-        'ffmpeg', '-y', '-f', 'lavfi', '-i',
-        'sine=frequency=65:duration=0.18,afade=t=out:st=0:d=0.18',
-        '-ar', '44100', impact
-    ], capture_output=True, timeout=10)
-    if os.path.exists(impact):
-        sfx_paths.append(impact)
+    if not os.path.exists(whoosh):
+        return None
 
-    # Ding (high sine ping)
-    ding = os.path.join(tmpdir, 'sfx_ding.wav')
-    subprocess.run([
-        'ffmpeg', '-y', '-f', 'lavfi', '-i',
-        'sine=frequency=1200:duration=0.12,afade=t=out:st=0.02:d=0.10',
-        '-ar', '44100', ding
-    ], capture_output=True, timeout=10)
-    if os.path.exists(ding):
-        sfx_paths.append(ding)
+    # Create a combined SFX track: place whoosh at each transition time using adelay
+    sfx_track = os.path.join(tmpdir, 'sfx_combined.wav')
+    n = min(len(transition_times), 6)  # max 6 SFX to keep it clean
+    if n == 0:
+        return None
 
-    return sfx_paths
+    # Build filter: duplicate the whoosh N times with different delays, then mix
+    inputs = ' '.join([f'-i {whoosh}' for _ in range(n)])
+    delays = ';'.join([f'[{i}:a]adelay={int(transition_times[i]*1000)}|{int(transition_times[i]*1000)},volume=0.4[s{i}]' for i in range(n)])
+    mix_labels = ''.join([f'[s{i}]' for i in range(n)])
+    flt = f"{delays};{mix_labels}amix=inputs={n}:normalize=0,atrim=0:{total_duration:.2f}[out]"
+
+    cmd = f"ffmpeg -y {inputs} -filter_complex \"{flt}\" -map [out] -ar 44100 {sfx_track}"
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=30)
+
+    if r.returncode == 0 and os.path.exists(sfx_track) and os.path.getsize(sfx_track) > 100:
+        print(f"SFX track generated with {n} whooshes")
+        return sfx_track
+    else:
+        print(f"SFX track generation failed: {r.stderr[-200:]}")
+        return None
 
 
 def generate_voiceover(text, output_path):
@@ -518,9 +511,9 @@ def generate_video_async(job_id, script, images_b64):
                 jobs[job_id]['error'] = result.stderr[-500:]
                 return
 
-            # Generate SFX and compute transition timestamps
-            sfx_paths = generate_sfx(tmpdir)
+            # Generate SFX track and compute transition timestamps
             transition_times = [section_duration * i for i in range(1, n_micro_sections)]
+            sfx_track = generate_sfx_track(tmpdir, transition_times, total_duration)
 
             output_path = os.path.join(tmpdir, 'final.mp4')
             music_path = download_music(tmpdir)
@@ -528,43 +521,31 @@ def generate_video_async(job_id, script, images_b64):
             fade_start = max(0.1, total_duration - 1.2)
             dur_str = f"{total_duration:.2f}"
 
-            if has_voice and music_path and sfx_paths:
-                # Build SFX overlay: place a random SFX at each transition point
-                sfx_filter_inputs = ""
-                sfx_filter_parts = []
-                sfx_input_args = []
-                for ti, tt in enumerate(transition_times[:8]):  # cap at 8 SFX to avoid filter complexity
-                    sfx_file = random.choice(sfx_paths)
-                    input_idx = 3 + ti
-                    sfx_input_args.extend(['-i', sfx_file])
-                    sfx_filter_parts.append(f"[{input_idx}:a]adelay={int(tt*1000)}|{int(tt*1000)},volume=0.5[sfx{ti}]")
-
-                sfx_mix_inputs = ''.join(f'[sfx{i}]' for i in range(len(sfx_filter_parts)))
-                if sfx_filter_parts:
-                    sfx_merge = f"{sfx_mix_inputs}amix=inputs={len(sfx_filter_parts)}:normalize=0[sfxmix]"
-                    flt = (
-                        f"[2:a]volume=0.10[m];[1:a]volume=1.0[v];"
-                        f"{';'.join(sfx_filter_parts)};{sfx_merge};"
-                        f"[v][m]amix=inputs=2:duration=longest:dropout_transition=2[vm];"
-                        f"[vm][sfxmix]amix=inputs=2:duration=first:normalize=0[premix];"
-                        f"[premix]afade=t=out:st={fade_start:.2f}:d=1.2[aout]"
-                    )
-                    mix_cmd = [
-                        'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
-                        '-stream_loop', '-1', '-i', music_path,
-                    ] + sfx_input_args + [
-                        '-filter_complex', flt, '-map', '0:v', '-map', '[aout]',
-                        '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', dur_str, output_path
-                    ]
-                    mix_result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=180)
-                    mixed_ok = mix_result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
-                    if not mixed_ok:
-                        print(f"SFX mix failed: {mix_result.stderr[-300:]}")
+            # Best case: voice + music + SFX (3 clean inputs)
+            if has_voice and music_path and sfx_track:
+                flt = (
+                    f"[2:a]volume=0.12,aloop=loop=-1:size=2e+09[m];"
+                    f"[3:a]volume=0.5[sfx];"
+                    f"[1:a][m]amix=inputs=2:duration=first:dropout_transition=2[vm];"
+                    f"[vm][sfx]amix=inputs=2:duration=first:normalize=0[premix];"
+                    f"[premix]afade=t=out:st={fade_start:.2f}:d=1.2[aout]"
+                )
+                mix_cmd = [
+                    'ffmpeg', '-y', '-i', silent_video_path, '-i', voice_path,
+                    '-stream_loop', '-1', '-i', music_path,
+                    '-i', sfx_track,
+                    '-filter_complex', flt, '-map', '0:v', '-map', '[aout]',
+                    '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k', '-t', dur_str, output_path
+                ]
+                mix_result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=180)
+                mixed_ok = mix_result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+                if not mixed_ok:
+                    print(f"Voice+music+SFX mix failed: {mix_result.stderr[-300:]}")
 
             # Fallback: voice + music without SFX
             if not mixed_ok and has_voice and music_path:
                 flt = (
-                    f"[2:a]volume=0.10[m];[1:a]volume=1.0[v];"
+                    f"[2:a]volume=0.12[m];[1:a]volume=1.0[v];"
                     f"[v][m]amix=inputs=2:duration=longest:dropout_transition=2[mix];"
                     f"[mix]afade=t=out:st={fade_start:.2f}:d=1.2[aout]"
                 )
@@ -576,6 +557,8 @@ def generate_video_async(job_id, script, images_b64):
                 ]
                 mix_result = subprocess.run(mix_cmd, capture_output=True, text=True, timeout=120)
                 mixed_ok = mix_result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 1000
+                if not mixed_ok:
+                    print(f"Voice+music mix failed: {mix_result.stderr[-300:]}")
 
             # Fallback: voice only
             if not mixed_ok and has_voice:
