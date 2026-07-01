@@ -7,7 +7,7 @@ import threading
 import uuid
 import time
 import urllib.request
-from PIL import Image, ImageDraw, ImageFont, ImageEnhance, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageEnhance
 import textwrap
 import math
 import random
@@ -19,8 +19,9 @@ jobs = {}
 
 W, H = 720, 1280
 
-# ===== BRANDING: phrase signature parlée + affichée au début de chaque vidéo =====
+# ===== BRANDING =====
 SIGNATURE = "Tiens-toi bien, ça va te choquer !"
+CTA_TEXT = "Abonne-toi pour plus de faits fous !"
 
 PALETTE = [
     {"accent": (255, 56, 100), "accent2": (255, 220, 0), "name": "fire"},
@@ -46,7 +47,6 @@ def load_fonts():
     base = "/usr/share/fonts/truetype/dejavu/"
     return {
         'caption': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 58),
-        'title': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 66),
         'outro': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 60),
         'small': ImageFont.truetype(base + "DejaVuSans-Bold.ttf", 30),
     }
@@ -130,44 +130,6 @@ def group_words(words, words_per_group=3):
     return groups
 
 
-def draw_title_card(draw, fonts, title, t_elapsed, palette):
-    """Intro: shows the SUBJECT clearly + the signature catchphrase, animated."""
-    accent = palette['accent']
-    accent2 = palette['accent2']
-    pop = ease_out_back(min(1.0, t_elapsed / 0.45))
-
-    # Signature brand line in an accent pill
-    sig = SIGNATURE.upper()
-    sf = fonts['small']
-    sb = draw.textbbox((0, 0), sig, font=sf)
-    sw = sb[2] - sb[0]
-    sy = int(H * 0.30)
-    draw.rounded_rectangle([(W // 2 - sw // 2 - 22, sy - 8), (W // 2 + sw // 2 + 22, sy + 46)],
-                           radius=24, fill=(*accent, 235))
-    draw.text((W // 2 - sw // 2, sy), sig, font=sf, fill=(255, 255, 255))
-
-    # Big title (the subject), wrapped + bounce-in
-    tf = fonts['title']
-    wrapped = textwrap.fill(title.upper(), width=13)
-    lines = wrapped.split('\n')
-    lh = 78
-    bounce = int((1 - pop) * 60)
-    ty = int(H * 0.46) - (len(lines) * lh) // 2 - bounce
-    last_y = ty
-    for line in lines:
-        bb = draw.textbbox((0, 0), line, font=tf)
-        lw = bb[2] - bb[0]
-        x = (W - lw) // 2
-        draw_outlined_text(draw, x, ty, line, tf, (255, 255, 255), outline_w=6)
-        last_y = ty
-        ty += lh
-
-    # Accent underline expanding in
-    uw = int(min(1.0, pop) * (W - 180))
-    uy = last_y + lh + 6
-    draw.rounded_rectangle([((W - uw) // 2, uy), ((W + uw) // 2, uy + 12)], radius=6, fill=accent2)
-
-
 def draw_karaoke_caption(draw, fonts, group, t_sec, frame_in_group, base_y, highlight_color):
     font = fonts['caption']
     line_height = 70
@@ -209,7 +171,6 @@ def draw_karaoke_caption(draw, fonts, group, t_sec, frame_in_group, base_y, high
 
 
 def draw_outro_card(draw, fonts, t_elapsed, palette):
-    """Clear ending so the video doesn't cut abruptly."""
     accent = palette['accent']
     accent2 = palette['accent2']
     pop = ease_out_back(min(1.0, t_elapsed / 0.4))
@@ -219,7 +180,7 @@ def draw_outro_card(draw, fonts, t_elapsed, palette):
     main = "ABONNE-TOI"
     bb = draw.textbbox((0, 0), main, font=of)
     lw = bb[2] - bb[0]
-    cy = int(H * 0.42) - bounce
+    cy = int(H * 0.44) - bounce
     pad = 44
     draw.rounded_rectangle([((W - lw) // 2 - pad, cy - 18), ((W + lw) // 2 + pad, cy + 92)],
                            radius=46, fill=(*accent, 240))
@@ -239,7 +200,7 @@ def draw_progress_bar(draw, global_frame_num, global_total_frames, accent2):
 
 
 def create_frame(bg_image, frame_num, total_frames, palette, motion_seed,
-                 title='', caption_groups=None, intro_end=1.8, voice_end=20.0,
+                 caption_groups=None, outro_start=20.0,
                  global_frame_num=0, global_total_frames=1, fps=24):
     accent2 = palette['accent2']
     fonts = load_fonts()
@@ -256,11 +217,8 @@ def create_frame(bg_image, frame_num, total_frames, palette, motion_seed,
 
     t = global_frame_num / fps
 
-    if t < intro_end:
-        # Intro: subject + signature
-        draw_title_card(draw, fonts, title, t, palette)
-    elif t < voice_end:
-        # Karaoke narration
+    if t < outro_start:
+        # Karaoke: signature + narration (subject carried by the punchy hook, no static title card)
         if caption_groups:
             for g in caption_groups:
                 if g[0]['start'] <= t < g[-1]['end']:
@@ -268,16 +226,15 @@ def create_frame(bg_image, frame_num, total_frames, palette, motion_seed,
                     draw_karaoke_caption(draw, fonts, g, t, frame_in, int(H * 0.56), accent2)
                     break
     else:
-        # Clear outro
-        draw_outro_card(draw, fonts, t - voice_end, palette)
+        # Clear spoken outro
+        draw_outro_card(draw, fonts, t - outro_start, palette)
 
     draw_progress_bar(draw, global_frame_num, global_total_frames, accent2)
     return img.convert('RGB')
 
 
 def generate_voiceover(text, output_path):
-    """Expressive French voiceover via Edge TTS multilingual voices, with fallbacks.
-    Returns (success, word_timings)."""
+    """Expressive French voiceover via Edge TTS multilingual voices. Returns (success, word_timings)."""
     primary = random.choice(["fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural"])
     voice_order = [primary, "fr-FR-HenriNeural", "fr-FR-DeniseNeural"]
 
@@ -312,7 +269,6 @@ def generate_voiceover(text, output_path):
             print(f"Edge TTS failed for {voice}: {e}")
             continue
 
-    # Last resort: gTTS (flat, no word timing)
     try:
         from gtts import gTTS
         gTTS(text=text, lang='fr', slow=False).save(output_path)
@@ -353,34 +309,55 @@ def generate_video_async(job_id, script, images_b64):
         fps = 24
         palette = random.choice(PALETTE)
         motion_seed = random.uniform(0, 6.28)
-        OUTRO_DURATION = 2.4
+        TAIL = 0.8
 
         with tempfile.TemporaryDirectory() as tmpdir:
             narration = script.get('voix_off') or (
                 f"{script.get('titre', '')}. {script.get('fait1', '')} {script.get('fait2', '')} "
                 f"{script.get('fait3', '')} {script.get('conclusion', '')}"
             )
-            # Spoken text = signature catchphrase + narration
-            full_text = f"{SIGNATURE} {narration}"
-            title = script.get('titre', 'LE SAVAIS-TU')
+            # Main segment = signature + narration (karaoke) ; CTA is a separate spoken segment
+            main_text = f"{SIGNATURE} {narration}"
 
+            main_path = os.path.join(tmpdir, 'main.mp3')
+            cta_path = os.path.join(tmpdir, 'cta.mp3')
             voice_path = os.path.join(tmpdir, 'voice.mp3')
-            has_voice, word_boundaries = generate_voiceover(full_text, voice_path)
-            voice_duration = get_audio_duration(voice_path) if has_voice else None
 
-            words = words_with_timing(word_boundaries, full_text, voice_duration)
-            n_sig = len(SIGNATURE.split())
-            narration_words = words[n_sig:] if len(words) > n_sig else words
-            caption_groups = group_words(narration_words, words_per_group=3)
+            ok_main, wb_main = generate_voiceover(main_text, main_path)
+            dm = get_audio_duration(main_path) if ok_main else None
 
-            # Intro lasts until the narration's first word starts (i.e. while signature is spoken)
-            if narration_words:
-                intro_end = max(1.2, min(narration_words[0]['start'], 3.0))
+            ok_cta, _ = generate_voiceover(CTA_TEXT, cta_path)
+            dc = get_audio_duration(cta_path) if ok_cta else None
+
+            has_voice = False
+            if ok_main and ok_cta and dc:
+                # Concatenate main + CTA so the "abonne-toi" is actually spoken at the end
+                concat_cmd = [
+                    'ffmpeg', '-y', '-i', main_path, '-i', cta_path,
+                    '-filter_complex', '[0:a][1:a]concat=n=2:v=0:a=1[a]',
+                    '-map', '[a]', voice_path
+                ]
+                r = subprocess.run(concat_cmd, capture_output=True, text=True, timeout=60)
+                if r.returncode == 0 and os.path.exists(voice_path) and os.path.getsize(voice_path) > 1000:
+                    has_voice = True
+                else:
+                    voice_path = main_path
+                    dc = 0
+                    has_voice = True
+            elif ok_main:
+                voice_path = main_path
+                dc = 0
+                has_voice = True
+
+            if has_voice and dm and dm > 3:
+                words = words_with_timing(wb_main, main_text, dm)
+                caption_groups = group_words(words, words_per_group=3)
+                outro_start = dm
+                total_duration = dm + (dc or 1.6) + TAIL
             else:
-                intro_end = 1.8
-
-            voice_end = voice_duration if (voice_duration and voice_duration > 3) else 20.0
-            total_duration = voice_end + OUTRO_DURATION
+                caption_groups = []
+                outro_start = 18.0
+                total_duration = 22.0
 
             n_micro_sections = 6
             section_duration = total_duration / n_micro_sections
@@ -416,8 +393,7 @@ def generate_video_async(job_id, script, images_b64):
                 frame = create_frame(
                     bg, local_frame_num, int(section_duration * fps),
                     palette, local_motion_seed,
-                    title=title, caption_groups=caption_groups,
-                    intro_end=intro_end, voice_end=voice_end,
+                    caption_groups=caption_groups, outro_start=outro_start,
                     global_frame_num=frame_num, global_total_frames=total_frames, fps=fps
                 )
                 frame.save(os.path.join(frames_dir, f'frame_{frame_num:05d}.jpg'), quality=88)
@@ -435,7 +411,7 @@ def generate_video_async(job_id, script, images_b64):
                 jobs[job_id]['error'] = result.stderr[-500:]
                 return
 
-            output_path = os.path.join(tmpdir, 'video.mp4')
+            output_path = os.path.join(tmpdir, 'final.mp4')
             music_path = download_music(tmpdir)
             mixed_ok = False
             fade_start = max(0.1, total_duration - 1.0)
