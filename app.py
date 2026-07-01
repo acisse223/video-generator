@@ -235,8 +235,19 @@ def create_frame(bg_image, frame_num, total_frames, palette, motion_seed,
 
 def generate_voiceover(text, output_path):
     """Expressive French voiceover via Edge TTS multilingual voices. Returns (success, word_timings)."""
-    primary = random.choice(["fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural"])
-    voice_order = [primary, "fr-FR-HenriNeural", "fr-FR-DeniseNeural"]
+    all_voices = [
+        "fr-FR-RemyMultilingualNeural",
+        "fr-FR-VivienneMultilingualNeural",
+        "fr-FR-LucienMultilingualNeural",
+        "fr-FR-HenriNeural",
+        "fr-FR-DeniseNeural",
+        "fr-BE-CharlineNeural",
+        "fr-CA-AntoineNeural",
+        "fr-CA-SylvieNeural",
+        "fr-CH-FabriceNeural",
+    ]
+    primary = random.choice(all_voices)
+    voice_order = [primary, "fr-FR-RemyMultilingualNeural", "fr-FR-HenriNeural"]
 
     for voice in voice_order:
         try:
@@ -359,7 +370,7 @@ def generate_video_async(job_id, script, images_b64):
                 outro_start = 18.0
                 total_duration = 22.0
 
-            n_micro_sections = 8
+            n_micro_sections = 12
             section_duration = total_duration / n_micro_sections
             total_frames = int(total_duration * fps)
 
@@ -381,7 +392,7 @@ def generate_video_async(job_id, script, images_b64):
                         print(f"Image load error for {key}: {e}")
                 bgs.append(bg)
 
-            micro_to_img = [0, 1, 2, 3, 0, 1, 2, 3]
+            micro_to_img = [0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3]
 
             for frame_num in range(total_frames):
                 t_sec = frame_num / fps
